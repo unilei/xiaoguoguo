@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "xiaoguoguo",
+  "main": "index.js",
+  "compatibility_date": "2026-08-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "../web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "XGG_KV",
+      "id": "REPLACE_WITH_YOUR_KV_ID"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

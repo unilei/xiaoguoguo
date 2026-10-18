@@ -6,7 +6,15 @@
 import crypto from "node:crypto";
 import os from "node:os";
 import { verifyAccount } from "./account.mjs";
-import { setAccountCookie } from "./provider.mjs";
+
+// 由调用方注入：Node 服务传 provider 的实现，Worker 传自己的 KV 版本。
+let applyCookie = () => {
+  throw new Error("扫码导入模块尚未注入保存实现");
+};
+
+export function configureImportSession(next) {
+  applyCookie = next.setAccountCookie;
+}
 
 const TTL = 5 * 60 * 1000;
 const sessions = new Map();
@@ -59,7 +67,7 @@ export async function submitImport(token, cookie) {
   if (!value) return { ok: false, reason: "没有收到 Cookie" };
   const result = await verifyAccount(value);
   if (!result.ok) return { ok: false, reason: result.reason };
-  setAccountCookie(value);
+  await applyCookie(value);
   session.used = true;
   sessions.delete(session.token);
   return { ok: true, profile: result.profile };

@@ -1,0 +1,20 @@
+{
+  "name": "xiaoguoguo-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "scripts": {
+    "vendor": "node build-vendor.mjs",
+    "predev": "node build-vendor.mjs",
+    "dev": "wrangler dev",
+    "predeploy": "node build-vendor.mjs && npm run build --prefix ../web",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  }
+}

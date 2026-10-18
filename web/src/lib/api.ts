@@ -76,7 +76,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () =>
-    request<{ service: string; account: "configured" | "anonymous" }>("/api/health"),
+    request<{
+      service: string;
+      account: "configured" | "anonymous";
+      runtime?: "cloudflare-worker" | string;
+      kv?: boolean;
+    }>("/api/health"),
   home: (page = 1) => request<ListPage>(`/api/home?page=${page}`),
   search: (query: string, page = 1) =>
     request<ListPage>(`/api/search?q=${encodeURIComponent(query)}&page=${page}`),

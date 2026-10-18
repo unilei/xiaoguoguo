@@ -97,12 +97,24 @@ Cookie 只保存在服务进程内存里，不写入仓库、日志或前端存�
 > Cookie 等同于账号凭据，请不要发给别人、不要提交到仓库，也不要在公共电脑上使用。
 > 平台修改接口后该方式可能失效。
 
+## 部署到 Cloudflare
+
+后端可以跑在 Cloudflare Workers 上，不需要自己的服务器。已实测首页、详情、搜索、
+播放与分段流全部可用。详见 [Cloudflare 部署说明](docs/CLOUDFLARE.md)。
+
+```sh
+npm install --prefix worker
+npx wrangler kv namespace create XGG_KV   # 把 id 填进 worker/wrangler.jsonc
+cd worker && npm run deploy
+```
+
 ## 架构
 
 ```
 web/      React 19 + Vite + TypeScript 单页应用
 server/   Node HTTP 服务：官网 SSR 解析、设备注册、请求签名、播放代理
           └─ src/vendor/hongguo.cjs  固定版本的上游协议实现（GPL-3.0）
+worker/   Cloudflare Workers 入口：同一套接口，vendor 静态转换后打包
 ```
 
 服务端负责三件事：

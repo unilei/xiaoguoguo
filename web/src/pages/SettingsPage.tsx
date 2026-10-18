@@ -14,12 +14,16 @@ export function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [profile, setProfile] = useState<AccountProfile | null>(null);
   const [expiry, setExpiry] = useState<SessionExpiry | null>(null);
+  const [runtime, setRuntime] = useState<string>("");
   const hint = loadAccountHint();
 
   useEffect(() => {
     api
       .health()
-      .then((data) => setStatus(data.account === "configured" ? "configured" : "anonymous"))
+      .then((data) => {
+        setStatus(data.account === "configured" ? "configured" : "anonymous");
+        setRuntime(data.runtime || "node");
+      })
       .catch(() => setStatus("offline"));
   }, []);
 
@@ -88,6 +92,7 @@ export function SettingsPage() {
           }}
         />
 
+        {runtime !== "cloudflare-worker" && (
         <DeviceImport
           onImported={(value, expiry) => {
             markConfigured(value);
@@ -97,6 +102,7 @@ export function SettingsPage() {
             );
           }}
         />
+        )}
 
         <QrImport onImported={markConfigured} />
 
@@ -169,6 +175,10 @@ export function SettingsPage() {
           <div className="kv">
             <span>服务版本</span>
             <span>0.1.0</span>
+          </div>
+          <div className="kv">
+            <span>运行环境</span>
+            <span>{runtime === "cloudflare-worker" ? "Cloudflare Worker" : runtime ? "Node" : "—"}</span>
           </div>
           <div className="kv">
             <span>浏览与搜索</span>

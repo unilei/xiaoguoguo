@@ -4,7 +4,20 @@
 // 现造一个账号（昵称形如「用户19058925」）。这种响应必须挡住，否则一份坏凭据
 // 会被当成导入成功，界面上只是「一条记录都没有」。判定逻辑移植自 HGTV 的
 // Account.kt / ContentRepository.kt（GPL-3.0）。
-import { ensureIdentity, signedRequest } from "./provider.mjs";
+// 依赖由调用方注入：Node 服务传 provider 的实现，Worker 传自己的版本，
+// 这样本模块不会把 provider 里的 node:vm 一起带进打包。
+let deps = {
+  ensureIdentity: async () => {
+    throw new Error("账号模块尚未注入设备身份实现");
+  },
+  signedRequest: () => {
+    throw new Error("账号模块尚未注入签名实现");
+  },
+};
+
+export function configureAccountModule(next) {
+  deps = { ...deps, ...next };
+}
 
 const ACCOUNT_HOST = "https://api5-normal-sinfonlinea.fqnovel.com";
 
@@ -15,7 +28,7 @@ const ACCOUNT_HOST = "https://api5-normal-sinfonlinea.fqnovel.com";
 export async function verifyAccount(cookie) {
   const value = String(cookie || "").trim();
   if (!value) return { ok: false, reason: "Cookie 为空" };
-  const identity = await ensureIdentity();
+  const identity = await deps.ensureIdentity();
   const values = {
     ac: "wifi",
     aid: "8662",
@@ -36,7 +49,7 @@ export async function verifyAccount(cookie) {
     device_id: identity.deviceId,
     iid: identity.installId,
   };
-  const signed = signedRequest(`${ACCOUNT_HOST}/reading/user/info/v1/`, values, null);
+  const signed = deps.signedRequest(`${ACCOUNT_HOST}/reading/user/info/v1/`, values, null);
   signed.headers.Cookie = value;
   const response = await fetch(signed.url, {
     headers: signed.headers,

@@ -6,3 +6,4 @@ dist/
 .env.local
 outputs/
 web/tsconfig.tsbuildinfo
+web/dist

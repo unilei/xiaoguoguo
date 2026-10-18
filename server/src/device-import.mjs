@@ -8,28 +8,13 @@
 // TC_STRING(0x74) + u2 长度 + UTF-8 排列，形如 [name, value, domain, path]。
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { COOKIE_KEYS, sessionExpiry } from "./cookie-utils.mjs";
+
+export { sessionExpiry };
 
 const run = promisify(execFile);
 
 const PACKAGE = "com.phoenix.read";
-
-// 组装 Cookie 头时要带的字段，顺序固定便于比对（与上游一致）。
-export const COOKIE_KEYS = [
-  "sessionid",
-  "sessionid_ss",
-  "sid_tt",
-  "uid_tt",
-  "uid_tt_ss",
-  "d_ticket",
-  "sid_guard",
-  "session_tlb_tag",
-  "store-region",
-  "store-region-src",
-  "install_id",
-  "n_mh",
-  "odin_tt",
-  "ttreq",
-];
 
 async function adb(serial, args, timeout = 20000) {
   const command = ["adb", ...(serial ? ["-s", serial] : []), ...args];
@@ -106,27 +91,6 @@ export function cookieHeader(cookies, host = "snssdk.com") {
   return COOKIE_KEYS.filter((name) => cookies[`${host}|${name}`])
     .map((name) => `${name}=${cookies[`${host}|${name}`]}`)
     .join("; ");
-}
-
-/** 解析 sid_guard 得到会话有效期。过期 = 签发时间 + max-age，第三段不是过期时间戳。 */
-export function sessionExpiry(cookie) {
-  const match = /sid_guard=([^;]+)/.exec(String(cookie || ""));
-  if (!match) return { known: false };
-  const parts = decodeURIComponent(match[1]).split("|");
-  if (parts.length < 3) return { known: false };
-  const issued = Number(parts[1]);
-  const maxAge = Number(parts[2]);
-  if (!Number.isFinite(issued) || !Number.isFinite(maxAge)) return { known: false };
-  const expires = issued + maxAge;
-  const now = Date.now() / 1000;
-  return {
-    known: true,
-    issued,
-    expires,
-    expiresText: new Date(expires * 1000).toLocaleString("zh-CN"),
-    remainingDays: Math.round(((expires - now) / 86400) * 10) / 10,
-    expired: now >= expires,
-  };
 }
 
 /**

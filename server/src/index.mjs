@@ -12,11 +12,14 @@ import {
   setAccountCookie,
   hasAccountCookie,
   accountCookieSnapshot,
+  ensureIdentity,
+  signedRequest,
 } from "./provider.mjs";
-import { verifyAccount } from "./account.mjs";
+import { configureAccountModule, verifyAccount } from "./account.mjs";
 import { importFromDevice, listDevices, sessionExpiry } from "./device-import.mjs";
-import { loginWithCode, sendLoginCode } from "./sms-login.mjs";
+import { configureSmsModule, loginWithCode, sendLoginCode } from "./sms-login.mjs";
 import {
+  configureImportSession,
   createImportSession,
   getImportSession,
   submitImport,
@@ -118,6 +121,11 @@ async function serveStatic(req, res, url) {
     }
   }
 }
+
+// 把设备身份与签名注入账号 / 短信模块（Worker 版会注入自己的实现）。
+configureAccountModule({ ensureIdentity, signedRequest });
+configureSmsModule({ ensureIdentity, signedRequest });
+configureImportSession({ setAccountCookie });
 
 const port = Number(process.env.PORT || 8788);
 const host = process.env.HOST || "127.0.0.1";

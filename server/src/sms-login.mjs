@@ -11,7 +11,19 @@
 //              sms_code_key=<上一步返回>, passport_mfa_retry_tag=1
 //
 // 两个接口都在 passport 域名下，带设备注册后拿到的 device_id / iid。
-import { ensureIdentity, signedRequest } from "./provider.mjs";
+// 与 account.mjs 一样，依赖由调用方注入（Node 服务 / Worker 各传自己的实现）。
+let deps = {
+  ensureIdentity: async () => {
+    throw new Error("短信登录模块尚未注入设备身份实现");
+  },
+  signedRequest: () => {
+    throw new Error("短信登录模块尚未注入签名实现");
+  },
+};
+
+export function configureSmsModule(next) {
+  deps = { ...deps, ...next };
+}
 
 // 实测：passport 域名对这两个路径回 404；能响应的是内容侧线路。
 const PASSPORT_HOSTS = [
@@ -22,13 +34,13 @@ const PASSPORT_HOSTS = [
 ];
 
 async function postForm(path, values, body) {
-  const identity = await ensureIdentity();
+  const identity = await deps.ensureIdentity();
   const params = new URLSearchParams(body).toString();
   let lastError = null;
   // 单条线路失败时换下一条；空响应体在这个平台上是常态，不是业务错误。
   for (const host of PASSPORT_HOSTS) {
     try {
-      const signed = signedRequest(`${host}${path}`, values, null);
+      const signed = deps.signedRequest(`${host}${path}`, values, null);
       if (identity.cookie) signed.headers.Cookie = identity.cookie;
       signed.headers["Content-Type"] = "application/x-www-form-urlencoded";
       const response = await fetch(signed.url, {
@@ -71,7 +83,7 @@ export async function sendLoginCode(mobile) {
   if (!/^1\d{10}$/.test(phone))
     return { ok: false, message: "手机号要 11 位、以 1 开头" };
 
-  const identity = await ensureIdentity();
+  const identity = await deps.ensureIdentity();
   const data = await postForm(
     "/passport/mobile/send_code/v1/",
     identityValues(identity),
@@ -115,7 +127,7 @@ export async function loginWithCode({ mobile, code, smsCodeKey }) {
   if (!/^\d{4,8}$/.test(value))
     return { ok: false, message: "验证码是 4—8 位数字" };
 
-  const identity = await ensureIdentity();
+  const identity = await deps.ensureIdentity();
   const data = await postForm(
     "/passport/mobile/sms_login/",
     identityValues(identity),

@@ -3,16 +3,39 @@
 import fs from "node:fs";
 import vm from "node:vm";
 import crypto from "node:crypto";
+import { sm3 as pureSm3 } from "./sm3.mjs";
 
 const vendorSource = fs.readFileSync(
   new URL("./vendor/hongguo.cjs", import.meta.url),
   "utf8"
 );
 
+// Cloudflare Workers 的 node:crypto 没有 sm3（实测 "Digest method not supported"），
+// 用一个只补 sm3 的包装层顶上去，其余算法仍走原生实现。
+const cryptoShim = {
+  ...crypto,
+  createHash(algorithm) {
+    if (String(algorithm).toLowerCase() === "sm3") {
+      const chunks = [];
+      return {
+        update(chunk) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+          return this;
+        },
+        digest(encoding) {
+          const result = pureSm3(Buffer.concat(chunks));
+          return encoding === "hex" ? result.toString("hex") : result;
+        },
+      };
+    }
+    return crypto.createHash(algorithm);
+  },
+};
+
 // 只暴露协议实现需要的模块；vendor 是固定版本的可信源码，不是用户脚本沙箱。
 const context = vm.createContext({
   require: (name) => {
-    if (name === "node:crypto") return crypto;
+    if (name === "node:crypto") return cryptoShim;
     throw new Error(`Unsupported module: ${name}`);
   },
   Buffer,
