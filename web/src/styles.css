@@ -1451,3 +1451,49 @@ img {
   color: var(--text);
   font-size: 12px;
 }
+
+/* ------------------------------------------------------------ forms */
+
+.form-row {
+  margin-bottom: 12px;
+}
+
+.form-row label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.text-input {
+  width: 100%;
+  height: 44px;
+  padding: 0 14px;
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 15px;
+  outline: none;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.text-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.code-row {
+  display: flex;
+  gap: 10px;
+}
+
+.code-row .text-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.code-row .button {
+  flex: none;
+  white-space: nowrap;
+}

@@ -51,47 +51,48 @@ HOST=0.0.0.0 PORT=8788 npm start
 Cookie 只保存在服务进程内存里，不写入仓库、日志或前端存储，服务重启后需重新填写。
 请只使用你自己的账号，不要分享或提交到代码仓库。
 
-### 怎么登录（照上游的实测结论）
+### 怎么登录
 
-先说结论：**红果没有网页登录，手机号验证码和平台扫码都走不通。**
-这不是我猜的，是上游 [HGTV `tools/login-lab`](https://github.com/pan8664716/HGTV/tree/main/tools/login-lab)
-逐条实测并写进 README 的：
+有三种方式，按推荐顺序：
 
-| 路径 | 实测结果 |
-| --- | --- |
-| 官网 `hongguoduanju.com` | 首页、详情页均无登录入口 |
-| `passport.snssdk.com` | 返回 401「认证中心」，是业务网关不是登录页 |
-| 手机号 + 验证码（`send_code`） | 短信**能发出**，但 `validate_code` 换登录态一律回 `会话过期`，`login/v1` 回 `该应用无权限` |
-| 官方扫码接口 | 全部 `error_code=16 该应用无权限` |
-| `sso.douyin.com` | 真浏览器能出扫码页，但对非浏览器请求 403（指纹层） |
+#### 方式一：手机号 + 验证码（设置页直接登录）
 
-所以小果果和上游一样，只提供**唯一真正可行**的方式：
-**在已登录的设备上，把 App 的登录态读出来。**
+红果账号的手机号收验证码即可登录，未注册的手机号会自动创建账号。
+参数与流程照 HGTV v1.1.5.1 APK 的实际调用还原：
 
-#### 方式一：从模拟器 / 手机导入（推荐，设置页一键完成）
+| 步骤 | 接口 | 关键参数 |
+| --- | --- | --- |
+| 发验证码 | `POST /passport/mobile/send_code/v1/` | `mobile="+86…"`、`account_sdk_source=app`、`passport_support_flow="captcha,verify"`、`mix_mode=1`、`auto_read=0`、`unbind_exist=34`、`type=24` |
+| 换登录态 | `POST /passport/mobile/sms_login/` | `mobile`、`code`、`sms_code_key`（上一步返回）、`passport_mfa_retry_tag=1` |
 
-1. 在 Android 模拟器（需 root，如 MuMu）或已 root 的手机上安装红果 App 并登录；
-2. 确认电脑上 `adb devices` 能看到设备；
-3. 打开小果果「设置 → 从手机 / 模拟器导入」，点「从设备导入」。
+两个接口都在 `api5-normal-*.fqnovel.com` 线路下（`passport.snssdk.com` 对这些路径回 404），
+并带上匿名设备注册得到的 `device_id` / `iid`。
 
-小果果会通过 adb 读取 App 的 `shared_prefs/cookieStore.xml`，按
-`TC_STRING(0x74) + u2 长度` 解析出 Cookie，再请求一次账号资料接口验证。
-这一步与上游 `dump_device.py` 的逻辑一致。
+> **实测注意**：同一 IP 短时间内多次调用会返回 `error_code=7 访问太频繁`，
+> 这是平台的频控，等一段时间或换网络即可。验证码有效期约 10 分钟。
 
-#### 方式二：手动粘贴 / 扫码传输
+#### 方式二：从模拟器 / 手机导入
 
-如果你已经用抓包工具拿到了 Cookie，可以直接粘贴到设置页；或者点「生成二维码」，
+设备上已有官方 App 的登录态时，小果果可以用 adb 直接把
+`shared_prefs/cookieStore.xml` 读出来，不用手动拼 Cookie。
+适合模拟器或已 root 的手机：确认 `adb devices` 能看到设备，点「从设备导入」。
+
+#### 方式三：手动粘贴 / 扫码传输
+
+已经用抓包工具拿到 Cookie 的话，可以直接粘贴；或点「生成二维码」，
 手机扫码后把 Cookie 粘贴到手机页面上传回电脑（这**只是传输**，不是登录）。
 
-> 设备档案（`device_id` / 机型）只作记录：上游实测用模拟器那套反而会被平台限流，
-> 因此签名仍使用内置档案，与上游结论一致。
+#### 关于官网
+
+`hongguoduanju.com` 本身没有登录入口——它只做浏览和播放，登录走的是 App 的 passport 通道。
+因此网页端无法「在官网登录后取 Cookie」，必须用上面三种方式之一。
 
 #### 有效期
 
 `sid_guard` 的四段是 `sessionid | 签发时间戳 | max-age | 人类可读时间`，
 **过期 = 签发 + max-age**（实测约 60 天），第三段不是过期时间戳。
 平台不会自动续期：业务接口不返回 `Set-Cookie`，refresh 端点要么空壳要么无权限。
-到期后需要在设备上重新登录一次，再导入一次。设置页会显示剩余天数。
+到期后需要重新登录或重新导入。设置页会显示剩余天数。
 
 > Cookie 等同于账号凭据，请不要发给别人、不要提交到仓库，也不要在公共电脑上使用。
 > 平台修改接口后该方式可能失效。
@@ -124,6 +125,8 @@ server/   Node HTTP 服务：官网 SSR 解析、设备注册、请求签名、�
 | `GET /api/episodes/:id/play` | `{ path, quality, kind }` |
 | `GET /api/episodes/:id/stream` | MP4 流，支持 Range |
 | `POST /api/account` | `{ cookie }` 校验并设置/清除账号 Cookie |
+| `POST /api/account/sms/send` | `{ mobile }` 发送登录验证码 |
+| `POST /api/account/sms/login` | `{ mobile, code, smsCodeKey }` 换登录态 |
 | `GET /api/account/devices` | 列出 adb 可见设备 |
 | `POST /api/account/device` | `{ serial }` 从设备导出登录态并验证 |
 | `POST /api/account/qr` | 生成一次性扫码传输会话（含二维码 Data URL） |

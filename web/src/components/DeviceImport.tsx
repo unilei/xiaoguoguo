@@ -69,11 +69,11 @@ export function DeviceImport({
 
   return (
     <section className="panel">
-      <h2>从手机 / 模拟器导入（推荐）</h2>
+      <h2>从手机 / 模拟器导入</h2>
       <p>
-        红果没有网页登录，手机号验证码与平台扫码也走不通——上游项目实测过并写进了结论。
-        唯一可行的是：在设备上用官方 App 登录，再把 App 的登录态取出来。
-        小果果通过 adb 直接读 <code>cookieStore.xml</code>，不用你手动拼 Cookie。
+        手机号登录之外的另一条路：设备上已有官方 App 的登录态时，直接用 adb 把
+        <code>cookieStore.xml</code> 读出来，不用手动拼 Cookie。
+        适合模拟器或已 root 的手机。
       </p>
 
       <ol className="steps">

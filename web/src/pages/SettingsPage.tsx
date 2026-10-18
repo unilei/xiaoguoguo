@@ -3,6 +3,7 @@ import { AccountProfile, api, SessionExpiry } from "../lib/api";
 import { loadAccountHint, saveAccountHint } from "../lib/storage";
 import { QrImport } from "../components/QrImport";
 import { DeviceImport } from "../components/DeviceImport";
+import { SmsLogin } from "../components/SmsLogin";
 
 export function SettingsPage() {
   const [cookie, setCookie] = useState("");
@@ -79,6 +80,14 @@ export function SettingsPage() {
       </div>
 
       <div className="settings-grid">
+        <SmsLogin
+          onLoggedIn={(value, expiry) => {
+            markConfigured(value);
+            setExpiry(expiry);
+            setMessage("手机号登录成功，完整播放已解锁。");
+          }}
+        />
+
         <DeviceImport
           onImported={(value, expiry) => {
             markConfigured(value);

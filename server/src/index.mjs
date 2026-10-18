@@ -15,6 +15,7 @@ import {
 } from "./provider.mjs";
 import { verifyAccount } from "./account.mjs";
 import { importFromDevice, listDevices, sessionExpiry } from "./device-import.mjs";
+import { loginWithCode, sendLoginCode } from "./sms-login.mjs";
 import {
   createImportSession,
   getImportSession,
@@ -174,6 +175,42 @@ const server = http.createServer(async (req, res) => {
         fields: imported.fields,
         expiry: imported.expiry,
         profile: result.profile,
+      });
+    }
+
+    // 手机号 + 验证码登录（参数照 HGTV APK 的实际调用还原）。
+    if (url.pathname === "/api/account/sms/send" && method === "POST") {
+      const body = await readBody(req);
+      let mobile = "";
+      try {
+        mobile = JSON.parse(body).mobile || "";
+      } catch {
+        mobile = "";
+      }
+      const result = await sendLoginCode(mobile);
+      return sendJson(res, result.ok ? 200 : 400, result);
+    }
+
+    if (url.pathname === "/api/account/sms/login" && method === "POST") {
+      const body = await readBody(req);
+      let payload = {};
+      try {
+        payload = JSON.parse(body);
+      } catch {
+        payload = {};
+      }
+      const result = await loginWithCode(payload);
+      if (!result.ok) return sendJson(res, 400, result);
+      const verified = await verifyAccount(result.cookie);
+      if (!verified.ok)
+        return sendJson(res, 400, {
+          error: `登录成功但凭据校验失败：${verified.reason}`,
+        });
+      setAccountCookie(result.cookie);
+      return sendJson(res, 200, {
+        ok: true,
+        profile: verified.profile,
+        expiry: sessionExpiry(result.cookie),
       });
     }
 

@@ -65,8 +65,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error("服务返回了无法解析的内容");
   }
   if (!response.ok) {
-    const message = (data as ApiError | null)?.error;
-    throw new Error(message || `请求失败（${response.status}）`);
+    // 后端两种失败形态：{ error } 和 { ok:false, message }，都要把真实原因带出来。
+    const payload = data as { error?: string; message?: string } | null;
+    throw new Error(
+      payload?.error || payload?.message || `请求失败（${response.status}）`
+    );
   }
   return data as T;
 }
@@ -97,6 +100,26 @@ export const api = {
     request<{ valid: boolean; expiresAt: number }>(`/api/account/qr/${token}`),
   devices: () =>
     request<{ ok: boolean; devices: string[]; error?: string }>("/api/account/devices"),
+  sendSms: (mobile: string) =>
+    request<{
+      ok: boolean;
+      mobile: string;
+      smsCodeKey: string;
+      retryAfter: number;
+      message: string;
+    }>("/api/account/sms/send", {
+      method: "POST",
+      body: JSON.stringify({ mobile }),
+    }),
+  loginSms: (mobile: string, code: string, smsCodeKey: string) =>
+    request<{
+      ok: boolean;
+      profile: AccountProfile;
+      expiry: SessionExpiry;
+    }>("/api/account/sms/login", {
+      method: "POST",
+      body: JSON.stringify({ mobile, code, smsCodeKey }),
+    }),
   importFromDevice: (serial: string) =>
     request<{
       ok: boolean;
