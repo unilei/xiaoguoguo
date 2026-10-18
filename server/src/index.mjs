@@ -2,6 +2,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import QRCode from "qrcode";
 import {
   home,
   search,
@@ -11,6 +12,13 @@ import {
   setAccountCookie,
   hasAccountCookie,
 } from "./provider.mjs";
+import { verifyAccount } from "./account.mjs";
+import {
+  createImportSession,
+  getImportSession,
+  submitImport,
+} from "./import-session.mjs";
+import { expiredPage, importPage, resultPage } from "./import-page.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const webRoot = path.resolve(here, "../../web/dist");
@@ -43,7 +51,7 @@ function readBody(req, limit = 16 * 1024) {
     req.on("data", (chunk) => {
       size += chunk.length;
       if (size > limit) {
-        reject(new Error("请求体过大"));
+        reject(Object.assign(new Error("请求体过大"), { status: 413 }));
         req.destroy();
         return;
       }
@@ -108,6 +116,9 @@ async function serveStatic(req, res, url) {
   }
 }
 
+const port = Number(process.env.PORT || 8788);
+const host = process.env.HOST || "127.0.0.1";
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", "http://localhost");
   const method = req.method || "GET";
@@ -132,8 +143,62 @@ const server = http.createServer(async (req, res) => {
       } catch {
         cookie = body;
       }
+      if (!cookie.trim()) {
+        setAccountCookie("");
+        return sendJson(res, 200, { ok: true, account: false });
+      }
+      const result = await verifyAccount(cookie);
+      if (!result.ok) return sendJson(res, 400, { error: result.reason });
       setAccountCookie(cookie);
-      return sendJson(res, 200, { ok: true, account: hasAccountCookie() });
+      return sendJson(res, 200, {
+        ok: true,
+        account: true,
+        profile: result.profile,
+      });
+    }
+
+    // 扫码导入：电脑端生成一次性二维码，手机扫码后在手机上粘贴 Cookie。
+    if (url.pathname === "/api/account/qr" && method === "POST") {
+      const session = createImportSession(port);
+      const qr = await QRCode.toDataURL(session.url, {
+        margin: 1,
+        width: 320,
+        color: { dark: "#0d0b10", light: "#ffffff" },
+      });
+      return sendJson(res, 200, { ...session, qr });
+    }
+
+    if (url.pathname.startsWith("/api/account/qr/") && method === "GET") {
+      const token = url.pathname.split("/").pop();
+      const session = getImportSession(token);
+      return sendJson(res, 200, { valid: Boolean(session), expiresAt: session?.expiresAt ?? 0 });
+    }
+
+    const importMatch = /^\/import\/([a-f0-9]{32})$/.exec(url.pathname);
+    if (url.pathname.startsWith("/import/") && !importMatch) {
+      res.writeHead(404, { "Content-Type": "text/html; charset=utf-8" });
+      return res.end(expiredPage());
+    }
+    if (importMatch) {
+      const token = importMatch[1];
+      const session = getImportSession(token);
+      if (!session) {
+        res.writeHead(410, { "Content-Type": "text/html; charset=utf-8" });
+        return res.end(expiredPage());
+      }
+      if (method === "GET") {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+        return res.end(importPage(token));
+      }
+      const body = await readBody(req, 64 * 1024);
+      let cookie = "";
+      try {
+        cookie = JSON.parse(body).cookie || "";
+      } catch {
+        cookie = body;
+      }
+      const result = await submitImport(token, cookie);
+      return sendJson(res, result.ok ? 200 : 400, result);
     }
 
     if (url.pathname === "/api/home") {
@@ -216,14 +281,18 @@ const server = http.createServer(async (req, res) => {
     const message = error instanceof Error ? error.message : "服务异常";
     // 不把上游地址或签名材料回显给客户端。
     console.error(JSON.stringify({ event: "request_failed", path: url.pathname, message }));
-    if (res.headersSent) res.destroy();
-    else sendJson(res, 502, { error: message || "内容源暂不可用，请稍后重试" });
+    if (res.headersSent) return res.destroy();
+    if (error?.status === 413)
+      return sendJson(res, 413, { error: "请求体过大" });
+    sendJson(res, 502, { error: message || "内容源暂不可用，请稍后重试" });
   }
 });
 
-const port = Number(process.env.PORT || 8788);
-const host = process.env.HOST || "127.0.0.1";
 server.listen(port, host, () => {
   console.log(`小果果内容服务：http://${host}:${port}`);
-  if (host === "0.0.0.0") console.log("局域网访问已开启，请只在可信网络使用。");
+  if (host === "0.0.0.0") {
+    console.log("局域网访问已开启，请只在可信网络使用。");
+  } else {
+    console.log("当前仅监听本机。要用手机扫码导入 Cookie，请用 HOST=0.0.0.0 启动。");
+  }
 });

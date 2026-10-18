@@ -81,11 +81,27 @@ export const api = {
   play: (episodeId: string) =>
     request<Playback>(`/api/episodes/${encodeURIComponent(episodeId)}/play`),
   saveAccount: (cookie: string) =>
-    request<{ ok: boolean; account: boolean }>("/api/account", {
+    request<{ ok: boolean; account: boolean; profile?: AccountProfile }>("/api/account", {
       method: "POST",
       body: JSON.stringify({ cookie }),
     }),
+  createQr: () =>
+    request<{
+      token: string;
+      url: string;
+      expiresAt: number;
+      sameDevice: boolean;
+      qr: string;
+    }>("/api/account/qr", { method: "POST" }),
+  qrStatus: (token: string) =>
+    request<{ valid: boolean; expiresAt: number }>(`/api/account/qr/${token}`),
 };
+
+export interface AccountProfile {
+  nickname: string;
+  avatar: string;
+  displayId: string;
+}
 
 export function streamUrl(episodeId: string): string {
   return `/api/episodes/${encodeURIComponent(episodeId)}/stream`;

@@ -82,7 +82,7 @@ function makeAxios() {
 let identity = null;
 let identityPromise = null;
 
-async function ensureIdentity() {
+export async function ensureIdentity() {
   if (identity) return identity;
   if (!identityPromise) {
     identityPromise = (async () => {
@@ -118,7 +118,7 @@ export function hasAccountCookie() {
 
 // ---------------------------------------------------------------- 请求签名
 
-function signedRequest(base, values, bodyObject) {
+export function signedRequest(base, values, bodyObject) {
   const now = Date.now();
   const ts = Math.floor(now / 1000);
   const body = bodyObject ? Buffer.from(JSON.stringify(bodyObject)) : null;

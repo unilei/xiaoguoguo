@@ -51,6 +51,39 @@ HOST=0.0.0.0 PORT=8788 npm start
 Cookie 只保存在服务进程内存里，不写入仓库、日志或前端存储，服务重启后需重新填写。
 请只使用你自己的账号，不要分享或提交到代码仓库。
 
+### 怎么拿到 Cookie
+
+小果果**不提供账号密码登录**，也没有"扫一扫就自动登录"的能力：红果官网没有登录入口，
+登录态只存在于 App / 客户端里，平台也没有公开可用的网页 OAuth。
+
+能用的方式只有一种——从**已登录**的环境里把 Cookie 导出来：
+
+1. **电脑浏览器（推荐）**：在 Chrome / Edge 打开 `hongguoduanju.com` 并完成登录，
+   按 F12 → Application（应用）→ Cookies → `https://hongguoduanju.com`，
+   复制 `sessionid`、`sid_tt`、`uid_tt`、`sid_guard` 等条目，拼成
+   `sessionid=...; sid_tt=...; uid_tt=...` 一整段。
+2. **手机 App**：红果 App 本身不暴露 Cookie，需要用抓包工具（如 mitmproxy / Charles）
+   抓一次请求，从请求头里复制整段 `Cookie`。这一步偏技术，普通用户不建议。
+
+拿到后有两种填入方式：
+
+- **扫码导入（推荐）**：设置页点「生成二维码」，手机扫码打开导入页，在手机上粘贴 Cookie，
+  电脑端自动接收并校验。二维码 5 分钟内有效、只能用一次。
+- **直接粘贴**：在设置页的文本框里粘贴，点「验证并保存」。
+
+扫码导入需要手机能访问电脑，因此启动时要监听局域网：
+
+```sh
+HOST=0.0.0.0 PORT=8788 npm start
+```
+
+只在本机使用时保持默认的 `127.0.0.1` 即可，此时设置页会提示二维码无法用手机访问。
+导入时会请求一次账号资料接口校验 Cookie；无效或过期的 Cookie 会被明确拒绝，
+不会出现"看起来导入成功、其实什么都没解锁"的情况。
+
+> Cookie 等同于账号凭据，请不要发给别人、不要提交到仓库，也不要在公共电脑上使用。
+> 平台修改接口后该方式可能失效。
+
 ## 架构
 
 ```
@@ -78,7 +111,11 @@ server/   Node HTTP 服务：官网 SSR 解析、设备注册、请求签名、�
 | `GET /api/series/:id` | 剧集详情 + `episodes` |
 | `GET /api/episodes/:id/play` | `{ path, quality, kind }` |
 | `GET /api/episodes/:id/stream` | MP4 流，支持 Range |
-| `POST /api/account` | `{ cookie }` 设置/清除账号 Cookie |
+| `POST /api/account` | `{ cookie }` 校验并设置/清除账号 Cookie |
+| `POST /api/account/qr` | 生成一次性扫码导入会话（含二维码 Data URL） |
+| `GET /api/account/qr/:token` | 查询扫码会话是否仍有效 |
+| `GET /import/:token` | 手机端 Cookie 导入页 |
+| `POST /import/:token` | 手机端提交 Cookie（校验通过才保存） |
 
 ## 来源与许可证
 

@@ -1356,3 +1356,65 @@ img {
     padding: 22px 14px 32px;
   }
 }
+
+/* ------------------------------------------------------------ qr import */
+
+.qr-box {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.qr-image {
+  width: 168px;
+  height: 168px;
+  border-radius: 12px;
+  background: #fff;
+  padding: 6px;
+  flex: none;
+}
+
+.qr-side {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.qr-url {
+  padding: 8px 11px;
+  border-radius: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.qr-hint {
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.qr-count {
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 760px) {
+  .qr-box {
+    gap: 14px;
+  }
+
+  .qr-image {
+    width: 140px;
+    height: 140px;
+  }
+}

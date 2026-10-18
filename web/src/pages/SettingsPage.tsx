@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { api } from "../lib/api";
+import { AccountProfile, api } from "../lib/api";
 import { loadAccountHint, saveAccountHint } from "../lib/storage";
+import { QrImport } from "../components/QrImport";
 
 export function SettingsPage() {
   const [cookie, setCookie] = useState("");
@@ -9,6 +10,7 @@ export function SettingsPage() {
   );
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
+  const [profile, setProfile] = useState<AccountProfile | null>(null);
   const hint = loadAccountHint();
 
   useEffect(() => {
@@ -17,6 +19,11 @@ export function SettingsPage() {
       .then((data) => setStatus(data.account === "configured" ? "configured" : "anonymous"))
       .catch(() => setStatus("offline"));
   }, []);
+
+  function markConfigured(value: AccountProfile) {
+    setStatus("configured");
+    setProfile(value);
+  }
 
   async function save() {
     const value = cookie.trim();
@@ -29,10 +36,16 @@ export function SettingsPage() {
     try {
       const result = await api.saveAccount(value);
       saveAccountHint(value.slice(0, 24));
-      setStatus(result.account ? "configured" : "anonymous");
-      setMessage("已保存到服务进程。重启服务后需要重新填写。");
-      setCookie("");
+      if (result.account) {
+        markConfigured(result.profile || { nickname: "已登录", avatar: "", displayId: "" });
+        setMessage("Cookie 验证通过，完整播放已解锁。");
+        setCookie("");
+      } else {
+        setStatus("anonymous");
+        setMessage("已清除账号 Cookie。");
+      }
     } catch (problem) {
+      setStatus("anonymous");
       setMessage(problem instanceof Error ? problem.message : "保存失败");
     } finally {
       setSaving(false);
@@ -45,6 +58,7 @@ export function SettingsPage() {
       await api.saveAccount("");
       saveAccountHint("");
       setStatus("anonymous");
+      setProfile(null);
       setMessage("已清除账号 Cookie，播放回到公开预览。");
     } catch (problem) {
       setMessage(problem instanceof Error ? problem.message : "清除失败");
@@ -63,6 +77,8 @@ export function SettingsPage() {
       </div>
 
       <div className="settings-grid">
+        <QrImport onImported={markConfigured} />
+
         <section className="panel">
           <h2>账号 Cookie（可选）</h2>
           <p>
@@ -73,12 +89,12 @@ export function SettingsPage() {
           <textarea
             value={cookie}
             onChange={(event) => setCookie(event.target.value)}
-            placeholder="粘贴整段 Cookie，例如：install_id=...; ttreq=...; sessionid=..."
+            placeholder="粘贴整段 Cookie，例如：sessionid=...; sid_tt=...; uid_tt=..."
             spellCheck={false}
           />
           <div className="panel-actions">
             <button className="button primary" onClick={() => void save()} disabled={saving}>
-              {saving ? "保存中…" : "保存"}
+              {saving ? "验证中…" : "验证并保存"}
             </button>
             <button className="button ghost" onClick={() => void clear()} disabled={saving}>
               清除
@@ -103,9 +119,17 @@ export function SettingsPage() {
             {status === "offline"
               ? "内容服务未连接"
               : status === "configured"
-                ? "已配置账号，可解析完整剧集"
+                ? profile?.nickname
+                  ? `已登录：${profile.nickname}`
+                  : "已配置账号，可解析完整剧集"
                 : "匿名模式，播放公开预览"}
           </div>
+          {profile?.displayId && (
+            <div className="kv">
+              <span>红果号</span>
+              <span>{profile.displayId}</span>
+            </div>
+          )}
           <div className="kv">
             <span>服务版本</span>
             <span>0.1.0</span>
