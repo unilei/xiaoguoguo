@@ -83,9 +83,16 @@ export function SettingsPage() {
           <h2>账号 Cookie（可选）</h2>
           <p>
             浏览与搜索不需要登录。平台从 2026-10 起对匿名请求不再返回完整播放地址，
-            因此公开预览通常只覆盖每部剧的前几集。填入你自己在红果 App / 网页端的
-            Cookie 后，服务端会用你的登录态解析全部剧集。
+            因此公开预览通常只覆盖每部剧的前几集。
           </p>
+          <div className="banner" style={{ marginBottom: 14 }}>
+            <span>
+              <strong>红果没有网页登录。</strong>
+              官网没有登录入口，登录态只存在于 App 里。要解锁完整播放，需要从已登录的
+              红果 App 导出 Cookie（手机抓包，或取出 App 的 cookieStore.xml）。
+              本项目不提供账号密码登录，也不会绕过平台限制。
+            </span>
+          </div>
           <textarea
             value={cookie}
             onChange={(event) => setCookie(event.target.value)}

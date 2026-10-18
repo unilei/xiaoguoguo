@@ -71,9 +71,11 @@ export function QrImport({
 
   return (
     <section className="panel">
-      <h2>扫码导入 Cookie</h2>
+      <h2>扫码传输 Cookie</h2>
       <p>
-        用手机扫描二维码，在手机上粘贴你已登录红果的 Cookie，电脑端会自动接收并验证。
+        红果没有网页登录，登录态只存在于 App 里。这个二维码不是登录入口——
+        它只是把你手机上已有的 Cookie 安全地传到电脑，省去手动输入。
+        用手机扫码后在手机上粘贴 Cookie，电脑端会自动接收并验证。
         二维码 5 分钟内有效，且只能用一次。
       </p>
 

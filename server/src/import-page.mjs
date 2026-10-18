@@ -80,12 +80,12 @@ export function importPage(token) {
     token,
     body: `
 <h1>导入账号 Cookie</h1>
-<p>小果果不提供账号密码登录。播放完整剧集需要你已登录红果 App 的 Cookie。</p>
+<p>红果没有网页登录，登录态只存在于 App 里。小果果不提供账号密码登录，需要你从已登录的红果 App 导出 Cookie。</p>
 <div class="card">
   <ol>
-    <li>在已登录红果的电脑浏览器里打开 <a href="https://hongguoduanju.com" target="_blank" rel="noreferrer">hongguoduanju.com</a>；<br>手机上则用红果 App。</li>
-    <li>打开开发者工具 → Application / 存储 → Cookies，复制 <code>sessionid</code>、<code>sid_tt</code>、<code>uid_tt</code> 等整段内容。</li>
-    <li>把整段 Cookie 粘贴到下面，点「验证并导入」。</li>
+    <li>手机安装抓包工具（mitmproxy / Charles / Stream），信任它的证书。</li>
+    <li>打开红果 App 随便浏览一下，在抓包记录里找到 <code>api5-normal-*.fqnovel.com</code> 的请求。</li>
+    <li>复制请求头里的整段 <code>Cookie</code>（含 <code>sessionid</code>、<code>sid_tt</code>、<code>uid_tt</code> 等），粘贴到下面。</li>
   </ol>
 </div>
 <form id="f">
@@ -94,8 +94,8 @@ export function importPage(token) {
   <div id="m" class="note" style="display:none"></div>
 </form>
 <div class="note">
-  这份 Cookie 会保存在你电脑上的小果果服务进程内存里，只用于替你请求播放地址；
-  不会写入仓库或日志，服务重启后需要重新导入。二维码 5 分钟内有效，且只能用一次。
+  这是把手机上的 Cookie <strong>传到电脑</strong>，不是登录。这份 Cookie 会保存在你电脑上的小果果服务进程内存里，
+  只用于替你请求播放地址；不会写入仓库或日志，服务重启后需要重新导入。二维码 5 分钟内有效，且只能用一次。
 </div>`,
   });
 }
