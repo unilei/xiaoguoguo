@@ -1,0 +1,16 @@
+{
+  "name": "xiaoguoguo-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "description": "小果果 Web 版内容服务：红果短剧接口接入、设备注册、签名与播放代理",
+  "scripts": {
+    "start": "node src/index.mjs",
+    "dev": "node --watch src/index.mjs",
+    "probe": "node src/probe.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "xiaoguoguo",
+  "version": "0.1.0",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "description": "小果果 · 红果短剧 Web 客户端",
+  "workspaces": ["server", "web"],
+  "scripts": {
+    "dev": "npm run dev --workspace web",
+    "build": "npm run build --workspace web",
+    "start": "npm run start --workspace server",
+    "typecheck": "npm run typecheck --workspace web",
+    "probe": "npm run probe --workspace server"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
