@@ -116,6 +116,11 @@ export function hasAccountCookie() {
   return Boolean(accountCookie);
 }
 
+/** 只供服务端内部读取（用于算有效期），不通过任何接口回传完整 Cookie。 */
+export function accountCookieSnapshot() {
+  return accountCookie;
+}
+
 // ---------------------------------------------------------------- 请求签名
 
 export function signedRequest(base, values, bodyObject) {

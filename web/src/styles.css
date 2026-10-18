@@ -1418,3 +1418,36 @@ img {
     height: 140px;
   }
 }
+
+/* ------------------------------------------------------------ device import */
+
+.steps {
+  margin: 0 0 16px;
+  padding-left: 20px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+.steps li {
+  margin-bottom: 6px;
+}
+
+.steps code,
+.panel p code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.device-select {
+  min-height: 34px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+}

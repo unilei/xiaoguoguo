@@ -7,7 +7,7 @@
 | 上游 | 许可证 | 本项目使用的部分 |
 | --- | --- | --- |
 | [N3urda/hongguoTV](https://github.com/N3urda/hongguoTV) | GPL-3.0 | 官网 `_ROUTER_DATA` 解析、内容服务适配层结构、域名与路由 |
-| [pan8664716/HGTV](https://github.com/pan8664716/HGTV) | GPL-3.0 | 匿名设备注册协议、签名分支与请求头、播放接口候选路径、CENC 索引处理 |
+| [pan8664716/HGTV](https://github.com/pan8664716/HGTV) | GPL-3.0 | 匿名设备注册协议、签名分支与请求头、播放接口候选路径、CENC 索引处理、`tools/login-lab` 的登录可行性与 `dump_device.py` 的凭据导出逻辑 |
 
 HGTV 本身是 hongguoTV 的 fork；两者著作权归各自作者。
 

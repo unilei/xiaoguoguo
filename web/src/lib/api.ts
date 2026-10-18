@@ -95,7 +95,29 @@ export const api = {
     }>("/api/account/qr", { method: "POST" }),
   qrStatus: (token: string) =>
     request<{ valid: boolean; expiresAt: number }>(`/api/account/qr/${token}`),
+  devices: () =>
+    request<{ ok: boolean; devices: string[]; error?: string }>("/api/account/devices"),
+  importFromDevice: (serial: string) =>
+    request<{
+      ok: boolean;
+      serial: string;
+      fields: number;
+      expiry: SessionExpiry;
+      profile: AccountProfile;
+    }>("/api/account/device", {
+      method: "POST",
+      body: JSON.stringify({ serial }),
+    }),
 };
+
+export interface SessionExpiry {
+  known: boolean;
+  issued?: number;
+  expires?: number;
+  expiresText?: string;
+  remainingDays?: number;
+  expired?: boolean;
+}
 
 export interface AccountProfile {
   nickname: string;

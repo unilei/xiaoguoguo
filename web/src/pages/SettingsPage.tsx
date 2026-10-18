@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { AccountProfile, api } from "../lib/api";
+import { AccountProfile, api, SessionExpiry } from "../lib/api";
 import { loadAccountHint, saveAccountHint } from "../lib/storage";
 import { QrImport } from "../components/QrImport";
+import { DeviceImport } from "../components/DeviceImport";
 
 export function SettingsPage() {
   const [cookie, setCookie] = useState("");
@@ -11,6 +12,7 @@ export function SettingsPage() {
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
   const [profile, setProfile] = useState<AccountProfile | null>(null);
+  const [expiry, setExpiry] = useState<SessionExpiry | null>(null);
   const hint = loadAccountHint();
 
   useEffect(() => {
@@ -77,6 +79,16 @@ export function SettingsPage() {
       </div>
 
       <div className="settings-grid">
+        <DeviceImport
+          onImported={(value, expiry) => {
+            markConfigured(value);
+            setExpiry(expiry);
+            setMessage(
+              `已从设备导入登录态${expiry.known ? `，有效期至 ${expiry.expiresText}` : ""}。`
+            );
+          }}
+        />
+
         <QrImport onImported={markConfigured} />
 
         <section className="panel">
@@ -135,6 +147,14 @@ export function SettingsPage() {
             <div className="kv">
               <span>红果号</span>
               <span>{profile.displayId}</span>
+            </div>
+          )}
+          {expiry?.known && (
+            <div className="kv">
+              <span>会话剩余</span>
+              <span>
+                {expiry.remainingDays} 天（{expiry.expiresText}）
+              </span>
             </div>
           )}
           <div className="kv">

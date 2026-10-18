@@ -51,46 +51,47 @@ HOST=0.0.0.0 PORT=8788 npm start
 Cookie 只保存在服务进程内存里，不写入仓库、日志或前端存储，服务重启后需重新填写。
 请只使用你自己的账号，不要分享或提交到代码仓库。
 
-### 怎么拿到 Cookie
+### 怎么登录（照上游的实测结论）
 
-**先说清楚：红果没有网页登录。** 官网 `hongguoduanju.com` 首页与详情页都没有登录入口，
-`passport.snssdk.com` 只返回 401 认证中心壳页，番茄小说站也没有登录入口。
-登录态只存在于**红果 App** 里，平台也没有开放可用的网页 OAuth。
-所以小果果**不提供账号密码登录**，也没有"扫一扫就自动登录"的能力——
-任何声称能扫码直接登录红果的，都需要你交出账号密码或验证码，不建议使用。
+先说结论：**红果没有网页登录，手机号验证码和平台扫码都走不通。**
+这不是我猜的，是上游 [HGTV `tools/login-lab`](https://github.com/pan8664716/HGTV/tree/main/tools/login-lab)
+逐条实测并写进 README 的：
 
-可行的方式只有一种：从**已登录的红果 App** 里把登录态导出来。
+| 路径 | 实测结果 |
+| --- | --- |
+| 官网 `hongguoduanju.com` | 首页、详情页均无登录入口 |
+| `passport.snssdk.com` | 返回 401「认证中心」，是业务网关不是登录页 |
+| 手机号 + 验证码（`send_code`） | 短信**能发出**，但 `validate_code` 换登录态一律回 `会话过期`，`login/v1` 回 `该应用无权限` |
+| 官方扫码接口 | 全部 `error_code=16 该应用无权限` |
+| `sso.douyin.com` | 真浏览器能出扫码页，但对非浏览器请求 403（指纹层） |
 
-**方式一：手机抓包（唯一能拿到完整登录态的方式）**
+所以小果果和上游一样，只提供**唯一真正可行**的方式：
+**在已登录的设备上，把 App 的登录态读出来。**
 
-1. 手机上安装 mitmproxy / Charles / Stream 之类的抓包工具并信任其证书；
-2. 打开红果 App，随便浏览一下（触发一次带登录态的请求）；
-3. 在抓包记录里找到 `api5-normal-*.fqnovel.com` 的请求，
-   复制请求头里的整段 `Cookie`（包含 `sessionid`、`sid_tt`、`uid_tt`、`sid_guard` 等）。
+#### 方式一：从模拟器 / 手机导入（推荐，设置页一键完成）
 
-这一步偏技术，如果你只是想看剧，用公开预览就够了，不需要折腾。
+1. 在 Android 模拟器（需 root，如 MuMu）或已 root 的手机上安装红果 App 并登录；
+2. 确认电脑上 `adb devices` 能看到设备；
+3. 打开小果果「设置 → 从手机 / 模拟器导入」，点「从设备导入」。
 
-**方式二：导出 App 的 cookie 文件（需要 root 或模拟器）**
+小果果会通过 adb 读取 App 的 `shared_prefs/cookieStore.xml`，按
+`TC_STRING(0x74) + u2 长度` 解析出 Cookie，再请求一次账号资料接口验证。
+这一步与上游 `dump_device.py` 的逻辑一致。
 
-红果 App 把登录态写在 `shared_prefs/cookieStore.xml`。有 root 的手机或 Android 模拟器
-可以直接取出这个文件，小果果能识别其中 `snssdk.com` 那组 Cookie。
-这也是上游 HGTV 客户端推荐的导入方式。
+#### 方式二：手动粘贴 / 扫码传输
 
-拿到 Cookie 后有两种填入方式：
+如果你已经用抓包工具拿到了 Cookie，可以直接粘贴到设置页；或者点「生成二维码」，
+手机扫码后把 Cookie 粘贴到手机页面上传回电脑（这**只是传输**，不是登录）。
 
-- **扫码传输（推荐）**：设置页点「生成二维码」，手机扫码打开导入页，在手机上粘贴 Cookie，
-  电脑端自动接收并校验。二维码 5 分钟内有效、只能用一次。**注意：这是把 Cookie 从手机传到电脑，不是登录。**
-- **直接粘贴**：在设置页的文本框里粘贴，点「验证并保存」。
+> 设备档案（`device_id` / 机型）只作记录：上游实测用模拟器那套反而会被平台限流，
+> 因此签名仍使用内置档案，与上游结论一致。
 
-扫码传输需要手机能访问电脑，因此启动时要监听局域网：
+#### 有效期
 
-```sh
-HOST=0.0.0.0 PORT=8788 npm start
-```
-
-只在本机使用时保持默认的 `127.0.0.1` 即可，此时设置页会提示二维码无法用手机访问。
-导入时会请求一次账号资料接口校验 Cookie；无效或过期的 Cookie 会被明确拒绝，
-不会出现"看起来导入成功、其实什么都没解锁"的情况。
+`sid_guard` 的四段是 `sessionid | 签发时间戳 | max-age | 人类可读时间`，
+**过期 = 签发 + max-age**（实测约 60 天），第三段不是过期时间戳。
+平台不会自动续期：业务接口不返回 `Set-Cookie`，refresh 端点要么空壳要么无权限。
+到期后需要在设备上重新登录一次，再导入一次。设置页会显示剩余天数。
 
 > Cookie 等同于账号凭据，请不要发给别人、不要提交到仓库，也不要在公共电脑上使用。
 > 平台修改接口后该方式可能失效。
@@ -123,7 +124,9 @@ server/   Node HTTP 服务：官网 SSR 解析、设备注册、请求签名、�
 | `GET /api/episodes/:id/play` | `{ path, quality, kind }` |
 | `GET /api/episodes/:id/stream` | MP4 流，支持 Range |
 | `POST /api/account` | `{ cookie }` 校验并设置/清除账号 Cookie |
-| `POST /api/account/qr` | 生成一次性扫码导入会话（含二维码 Data URL） |
+| `GET /api/account/devices` | 列出 adb 可见设备 |
+| `POST /api/account/device` | `{ serial }` 从设备导出登录态并验证 |
+| `POST /api/account/qr` | 生成一次性扫码传输会话（含二维码 Data URL） |
 | `GET /api/account/qr/:token` | 查询扫码会话是否仍有效 |
 | `GET /import/:token` | 手机端 Cookie 导入页 |
 | `POST /import/:token` | 手机端提交 Cookie（校验通过才保存） |

@@ -11,8 +11,10 @@ import {
   createStreamReader,
   setAccountCookie,
   hasAccountCookie,
+  accountCookieSnapshot,
 } from "./provider.mjs";
 import { verifyAccount } from "./account.mjs";
+import { importFromDevice, listDevices, sessionExpiry } from "./device-import.mjs";
 import {
   createImportSession,
   getImportSession,
@@ -132,6 +134,46 @@ const server = http.createServer(async (req, res) => {
         version: "0.1.0",
         apiVersion: 1,
         account: hasAccountCookie() ? "configured" : "anonymous",
+        expiry: sessionExpiry(accountCookieSnapshot()),
+      });
+    }
+
+    // 从已登录的 Android 设备 / 模拟器导出登录态（上游实测唯一可行的路径）。
+    if (url.pathname === "/api/account/devices" && method === "GET") {
+      try {
+        return sendJson(res, 200, { ok: true, devices: await listDevices() });
+      } catch (error) {
+        return sendJson(res, 200, {
+          ok: false,
+          devices: [],
+          error: error instanceof Error ? error.message : "adb 不可用",
+        });
+      }
+    }
+
+    if (url.pathname === "/api/account/device" && method === "POST") {
+      const body = await readBody(req);
+      let serial = "";
+      try {
+        serial = JSON.parse(body).serial || "";
+      } catch {
+        serial = "";
+      }
+      const imported = await importFromDevice(serial || undefined);
+      const result = await verifyAccount(imported.cookie);
+      if (!result.ok) {
+        return sendJson(res, 400, {
+          error: `导出成功但登录态无效：${result.reason}`,
+          expiry: imported.expiry,
+        });
+      }
+      setAccountCookie(imported.cookie);
+      return sendJson(res, 200, {
+        ok: true,
+        serial: imported.serial,
+        fields: imported.fields,
+        expiry: imported.expiry,
+        profile: result.profile,
       });
     }
 
