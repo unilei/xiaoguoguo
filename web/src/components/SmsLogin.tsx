@@ -1,6 +1,45 @@
 import { useEffect, useRef, useState } from "react";
 import { AccountProfile, api, SessionExpiry } from "../lib/api";
 
+// 发码凭证（mobile_ticket）与手机号配对保存：刷新页面后仍能完成登录，
+// 否则冷却期内既不能重发、又丢了凭证，只能干等。
+const TICKET_KEY = "xiaoguoguo.sms.v1";
+
+type SavedTicket = { mobile: string; ticket: string; at: number };
+
+function readTicket(): SavedTicket | null {
+  try {
+    const raw = localStorage.getItem(TICKET_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw) as SavedTicket;
+    if (!data?.mobile || !data?.ticket) return null;
+    // 平台验证码约 10 分钟有效，超过就不再使用。
+    if (Date.now() - (data.at || 0) > 10 * 60 * 1000) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function writeTicket(mobile: string, ticket: string): void {
+  try {
+    localStorage.setItem(
+      TICKET_KEY,
+      JSON.stringify({ mobile, ticket, at: Date.now() } satisfies SavedTicket)
+    );
+  } catch {
+    // 隐私模式下写不进去，退化成仅本次会话有效。
+  }
+}
+
+function clearTicket(): void {
+  try {
+    localStorage.removeItem(TICKET_KEY);
+  } catch {
+    // 忽略。
+  }
+}
+
 /**
  * 手机号 + 验证码登录。
  *
@@ -13,9 +52,10 @@ export function SmsLogin({
 }: {
   onLoggedIn: (profile: AccountProfile, expiry: SessionExpiry) => void;
 }) {
-  const [mobile, setMobile] = useState("");
+  const saved = readTicket();
+  const [mobile, setMobile] = useState(saved?.mobile || "");
   const [code, setCode] = useState("");
-  const [smsCodeKey, setSmsCodeKey] = useState("");
+  const [smsCodeKey, setSmsCodeKey] = useState(saved?.ticket || "");
   const [cooldown, setCooldown] = useState(0);
   const [busy, setBusy] = useState<"none" | "send" | "login">("none");
   const [message, setMessage] = useState("");
@@ -42,15 +82,21 @@ export function SmsLogin({
     try {
       const data = await api.sendSms(mobile.trim());
       setSmsCodeKey(data.smsCodeKey);
+      if (data.smsCodeKey) writeTicket(mobile.trim(), data.smsCodeKey);
       setCooldown(data.retryAfter || 60);
       setMessage(data.message);
     } catch (problem) {
       setFailed(true);
       const text = problem instanceof Error ? problem.message : "验证码发送失败";
       setMessage(text);
-      // 冷却期（1206）时平台仍会下发 ticket，把它留住，用户填已有验证码也能登录。
+      // 注意：冷却期（1206）响应里的 ticket 属于**新一次请求**，
+      // 和用户手机上那条短信不是一对。覆盖它会让正确的验证码也报 1203，
+      // 所以只在还没有 ticket 时记录，绝不覆盖已有的。
       const ticket = (problem as { mobileTicket?: string })?.mobileTicket;
-      if (ticket) setSmsCodeKey(ticket);
+      if (ticket && !smsCodeKey) {
+        setSmsCodeKey(ticket);
+        writeTicket(mobile.trim(), ticket);
+      }
       if (/等一会儿|太频繁/.test(text)) setCooldown(60);
     } finally {
       setBusy("none");
@@ -63,16 +109,28 @@ export function SmsLogin({
       setMessage("验证码是 4—8 位数字");
       return;
     }
+    if (!smsCodeKey) {
+      setFailed(true);
+      setMessage("还没有发码记录，请先点「获取验证码」，收到短信后再填。");
+      return;
+    }
     setBusy("login");
     setFailed(false);
     setMessage("");
     try {
       const data = await api.loginSms(mobile.trim(), code.trim(), smsCodeKey);
+      clearTicket();
       onLoggedIn(data.profile, data.expiry);
       setMessage("登录成功");
     } catch (problem) {
       setFailed(true);
-      setMessage(problem instanceof Error ? problem.message : "登录失败，请稍后重试");
+      const err = problem as Error & { code?: number };
+      const base = err.message || "登录失败，请稍后重试";
+      setMessage(
+        err.code === 1203
+          ? `${base}（验证码和发码记录对不上：确认手机号与刚才收短信的是同一个，并重新获取一次验证码）`
+          : base
+      );
     } finally {
       setBusy("none");
     }
