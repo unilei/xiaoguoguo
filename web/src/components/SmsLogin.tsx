@@ -124,12 +124,20 @@ export function SmsLogin({
       setMessage("登录成功");
     } catch (problem) {
       setFailed(true);
-      const err = problem as Error & { code?: number };
+      const err = problem as Error & {
+        code?: number;
+        ticketTail?: string;
+        phoneTail?: string;
+      };
       const base = err.message || "登录失败，请稍后重试";
+      const diag =
+        err.ticketTail || err.phoneTail
+          ? ` [诊断] 手机尾号 ${err.phoneTail || "?"}，凭证尾号 ${err.ticketTail || "无"}`
+          : "";
       setMessage(
         err.code === 1203
-          ? `${base}（验证码和发码记录对不上：确认手机号与刚才收短信的是同一个，并重新获取一次验证码）`
-          : base
+          ? `${base}（验证码与发证记录不匹配）${diag}`
+          : `${base}${diag}`
       );
     } finally {
       setBusy("none");

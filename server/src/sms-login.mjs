@@ -186,7 +186,14 @@ export async function loginWithCode({ mobile, code, smsCodeKey, mobileTicket }) 
         : code === 1204 || code === 1206
           ? "验证码不正确或已失效，请检查后重试。"
           : payload.description || data.message || "登录失败，请检查验证码或稍后重试";
-    return { ok: false, message, code };
+    return {
+      ok: false,
+      message,
+      code,
+      // 便于排查：告诉前端这次用的是哪个 ticket（只给尾部，不泄露完整凭证）。
+      ticketTail: (mobileTicket || smsCodeKey || "").slice(-8),
+      phoneTail: phone.slice(-4),
+    };
   }
   const sessionId = payload.sessionid || payload.sid_tt || "";
   if (!sessionId) {

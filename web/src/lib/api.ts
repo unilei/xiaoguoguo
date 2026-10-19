@@ -93,13 +93,27 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     // 后端两种失败形态：{ error } 和 { ok:false, message }，都要把真实原因带出来。
     // 有些错误还带着可继续使用的字段（如短信冷却期的 mobileTicket），挂到 error 上。
     const payload = data as
-      | { error?: string; message?: string; code?: number; mobileTicket?: string }
+      | {
+          error?: string;
+          message?: string;
+          code?: number;
+          mobileTicket?: string;
+          ticketTail?: string;
+          phoneTail?: string;
+        }
       | null;
     const failure = new Error(
       payload?.error || payload?.message || `请求失败（${response.status}）`
-    ) as Error & { code?: number; mobileTicket?: string };
+    ) as Error & {
+      code?: number;
+      mobileTicket?: string;
+      ticketTail?: string;
+      phoneTail?: string;
+    };
     if (payload?.code !== undefined) failure.code = payload.code;
     if (payload?.mobileTicket) failure.mobileTicket = payload.mobileTicket;
+    if (payload?.ticketTail) failure.ticketTail = payload.ticketTail;
+    if (payload?.phoneTail) failure.phoneTail = payload.phoneTail;
     throw failure;
   }
   return data as T;
