@@ -153,7 +153,7 @@ export async function sendLoginCode(mobile) {
  *
  * 平台对同一验证码只认一次；失败时把平台原文带回去，避免界面只说“登录失败”。
  */
-export async function loginWithCode({ mobile, code, smsCodeKey }) {
+export async function loginWithCode({ mobile, code, smsCodeKey, mobileTicket }) {
   const phone = String(mobile || "").replace(/\s|-/g, "");
   const value = String(code || "").trim();
   if (!/^1\d{10}$/.test(phone))
@@ -171,7 +171,9 @@ export async function loginWithCode({ mobile, code, smsCodeKey }) {
       account_sdk_source: "app",
       passport_support_flow: "captcha,verify",
       mix_mode: "1",
-      sms_code_key: smsCodeKey || "",
+      // 平台发码返回的是 mobile_ticket，登录时要按这个字段名回传。
+      // 之前误用 sms_code_key，平台回 1066「验证已过期」，看起来像验证码失效。
+      mobile_ticket: mobileTicket || smsCodeKey || "",
       passport_mfa_retry_tag: "1",
     }
   );

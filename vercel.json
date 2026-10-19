@@ -4,9 +4,18 @@
   "outputDirectory": "web/dist",
   "installCommand": "npm install",
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/index" },
-    { "source": "/import/(.*)", "destination": "/api/index" },
-    { "source": "/(.*)", "destination": "/index.html" }
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/import/(.*)",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
   ],
   "functions": {
     "api/index.mjs": {
@@ -14,5 +23,20 @@
       "memory": 1024,
       "includeFiles": "server/src/vendor/**"
     }
-  }
+  },
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        {
+          "key": "Access-Control-Expose-Headers",
+          "value": "x-xgg-device"
+        },
+        {
+          "key": "Access-Control-Allow-Headers",
+          "value": "Content-Type, x-xgg-device"
+        }
+      ]
+    }
+  ]
 }

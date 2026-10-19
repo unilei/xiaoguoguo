@@ -96,7 +96,10 @@ const server = http.createServer(async (req, res) => {
       method,
       pathname: url.pathname,
       searchParams: url.searchParams,
-      headers: { range: req.headers.range },
+      headers: {
+        range: req.headers.range,
+        "x-xgg-device": req.headers["x-xgg-device"],
+      },
       body,
       port,
     });

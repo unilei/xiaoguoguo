@@ -15,6 +15,7 @@ import {
   accountCookieSnapshot,
   ensureIdentity,
   signedRequest,
+  setRequestIdentity,
 } from "./provider.mjs";
 import { configureAccountModule, verifyAccount } from "./account.mjs";
 import { importFromDevice, listDevices, sessionExpiry } from "./device-import.mjs";
@@ -26,6 +27,11 @@ import {
   submitImport,
 } from "./import-session.mjs";
 import { expiredPage, importPage } from "./import-page.mjs";
+import {
+  IDENTITY_HEADER,
+  decodeIdentity,
+  encodeIdentity,
+} from "./identity-header.mjs";
 
 configureAccountModule({ ensureIdentity, signedRequest });
 configureSmsModule({ ensureIdentity, signedRequest });
@@ -107,6 +113,9 @@ export async function handleApi(request) {
   const rawBody = readBodyOf(request.body);
   const bodyLimit = 64 * 1024;
 
+  // 前端会把上一次拿到的设备身份带回来，保证发码 / 登录用同一台设备。
+  setRequestIdentity(decodeIdentity(headers[IDENTITY_HEADER]));
+
   if (pathname === "/api/health") {
     return jsonResponse(200, {
       service: "xiaoguoguo",
@@ -163,7 +172,14 @@ export async function handleApi(request) {
   if (pathname === "/api/account/sms/send" && method === "POST") {
     const mobile = parseJsonBody(rawBody).mobile || "";
     const result = await sendLoginCode(mobile);
-    return jsonResponse(result.ok ? 200 : 400, result);
+    // 把本次使用的设备身份交给前端保管，登录时原样带回。
+    const response = jsonResponse(result.ok ? 200 : 400, result);
+    const used = await ensureIdentity();
+    response.headers = {
+      ...response.headers,
+      [IDENTITY_HEADER]: encodeIdentity(used),
+    };
+    return response;
   }
 
   if (pathname === "/api/account/sms/login" && method === "POST") {
@@ -174,11 +190,16 @@ export async function handleApi(request) {
     if (!verified.ok)
       return jsonResponse(400, { error: `登录成功但凭据校验失败：${verified.reason}` });
     setAccountCookie(result.cookie);
-    return jsonResponse(200, {
+    const response = jsonResponse(200, {
       ok: true,
       profile: verified.profile,
       expiry: sessionExpiry(result.cookie),
     });
+    response.headers = {
+      ...response.headers,
+      [IDENTITY_HEADER]: encodeIdentity(await ensureIdentity()),
+    };
+    return response;
   }
 
   if (pathname === "/api/account" && method === "POST") {

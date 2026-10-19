@@ -49,14 +49,39 @@ export interface ApiError {
   error: string;
 }
 
+// 设备身份：发验证码时服务端下发，登录时原样带回。
+// Serverless 多实例之间不共享内存，靠这个头保证"同一台设备"。
+const DEVICE_KEY = "xiaoguoguo.device.v1";
+
+export function readDeviceId(): string {
+  try {
+    return localStorage.getItem(DEVICE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function rememberDevice(response: Response): void {
+  const value = response.headers.get("x-xgg-device");
+  if (!value) return;
+  try {
+    localStorage.setItem(DEVICE_KEY, value);
+  } catch {
+    // 隐私模式下写不进去，退化成每次新设备（登录可能失败，但不影响浏览）。
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const device = readDeviceId();
   const response = await fetch(path, {
     ...init,
     headers: {
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      ...(device ? { "x-xgg-device": device } : {}),
       ...(init?.headers || {}),
     },
   });
+  rememberDevice(response);
   const text = await response.text();
   let data: unknown = null;
   try {

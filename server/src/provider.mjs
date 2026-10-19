@@ -124,7 +124,16 @@ function makeAxios() {
 let identity = null;
 let identityPromise = null;
 
+// 请求级身份：由 api.mjs 从请求头读入后设置，优先于进程内缓存。
+// 这样无状态的 Serverless 多实例也能保证同一用户使用同一台设备。
+let requestIdentity = null;
+
+export function setRequestIdentity(value) {
+  requestIdentity = value;
+}
+
 export async function ensureIdentity() {
+  if (requestIdentity) return requestIdentity;
   if (identity) return identity;
   if (!identityPromise) {
     identityPromise = (async () => {
