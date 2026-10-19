@@ -97,16 +97,18 @@ Cookie 只保存在服务进程内存里，不写入仓库、日志或前端存�
 > Cookie 等同于账号凭据，请不要发给别人、不要提交到仓库，也不要在公共电脑上使用。
 > 平台修改接口后该方式可能失效。
 
-## 部署到 Cloudflare
+## 部署到 Vercel（推荐）
 
-后端可以跑在 Cloudflare Workers 上，不需要自己的服务器。已实测首页、详情、搜索、
-播放与分段流全部可用。详见 [Cloudflare 部署说明](docs/CLOUDFLARE.md)。
+Vercel 跑完整 Node.js，服务端可以直接复用，无需改造。
 
-```sh
-npm install --prefix worker
-npx wrangler kv namespace create XGG_KV   # 把 id 填进 worker/wrangler.jsonc
-cd worker && npm run deploy
-```
+1. 打开 <https://vercel.com/new>，用 GitHub 授权并导入 `unilei/xiaoguoguo`
+2. 保持默认配置（`vercel.json` 已写好），点 Deploy
+3. 之后每次 `git push` 都会自动部署
+
+详见 [Vercel 部署说明](docs/VERCEL.md)。
+
+> 也可以用 Cloudflare Workers，但 Workers 的 `node:crypto` 缺少 `createHash`，
+> 手机号登录等功能会报错，不推荐。见 [Cloudflare 部署说明](docs/CLOUDFLARE.md)。
 
 ## 架构
 
