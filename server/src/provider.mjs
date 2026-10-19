@@ -1,14 +1,33 @@
 // 内容接入：官网 SSR 列表/详情 + App 搜索（签名）+ 播放地址解析。
 // 协议实现来自 server/src/vendor/hongguo.cjs（drpys, GPL-3.0），本文件只做适配。
 import fs from "node:fs";
+import path from "node:path";
 import vm from "node:vm";
 import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { sm3 as pureSm3 } from "./sm3.mjs";
 
-const vendorSource = fs.readFileSync(
-  new URL("./vendor/hongguo.cjs", import.meta.url),
-  "utf8"
-);
+// Vercel / 打包器有时会改写 import.meta.url 或把文件挪位置，
+// 这里多试几个候选路径，避免因找不到 vendor 而整站不可用。
+function loadVendorSource() {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.join(here, "vendor", "hongguo.cjs"),
+    path.join(process.cwd(), "server", "src", "vendor", "hongguo.cjs"),
+    path.join(process.cwd(), "src", "vendor", "hongguo.cjs"),
+    path.join(process.cwd(), "vendor", "hongguo.cjs"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) return fs.readFileSync(candidate, "utf8");
+    } catch {
+      // 继续试下一个。
+    }
+  }
+  throw new Error("找不到 vendor/hongguo.cjs，部署时需一并打包该文件");
+}
+
+const vendorSource = loadVendorSource();
 
 // Cloudflare Workers 的 node:crypto 没有 sm3（实测 "Digest method not supported"），
 // 用一个只补 sm3 的包装层顶上去，其余算法仍走原生实现。

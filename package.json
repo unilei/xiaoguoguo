@@ -4,7 +4,10 @@
   "private": true,
   "license": "GPL-3.0-only",
   "description": "小果果 · 红果短剧 Web 客户端",
-  "workspaces": ["server", "web"],
+  "workspaces": [
+    "server",
+    "web"
+  ],
   "scripts": {
     "dev": "npm run dev --workspace web",
     "build": "npm run build --workspace web",
@@ -14,5 +17,8 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
   }
 }

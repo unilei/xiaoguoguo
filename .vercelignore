@@ -1,0 +1,5 @@
+worker/
+review/
+node_modules/
+.git/
+*.log
