@@ -66,12 +66,33 @@ async function postForm(path, values, body) {
   throw lastError || new Error("账号服务暂不可用");
 }
 
+// 版本号必须与 APK 实际使用的一致。实测 73932 / 7.3.9.32 会被平台按异常客户端
+// 处理，直接回「访问太频繁」；换成 APK 里的 73532 / 7.3.5.32 后才会进入正常业务分支。
+const APP_VERSION = {
+  version_code: "73532",
+  version_name: "7.3.5.32",
+  manifest_version_code: "73532",
+  update_version_code: "73532",
+};
+
 function identityValues(identity) {
   return {
     aid: "8662",
     app_name: "novelread",
     device_platform: "android",
-    version_code: "73932",
+    ...APP_VERSION,
+    // 与 APK 抓包一致的设备参数，缺了会被当成旧版本或异常客户端。
+    ac: "wifi",
+    channel: "update_64",
+    device_brand: "Redmi",
+    device_type: "25053RT47C",
+    dpi: "520",
+    os: "android",
+    os_api: "36",
+    os_version: "16",
+    resolution: "1280*2772",
+    ssmix: "a",
+    language: "zh",
     device_id: identity.deviceId,
     iid: identity.installId,
   };
@@ -99,11 +120,17 @@ export async function sendLoginCode(mobile) {
   );
   const payload = data.data || {};
   if (data.message !== "success") {
-    return {
-      ok: false,
-      message: payload.description || data.message || "验证码发送失败，请稍后重试",
-      code: payload.error_code,
-    };
+    const code = Number(payload.error_code || 0);
+    // 把平台错误码翻译成用户能理解、能照做的提示。
+    const message =
+      code === 1204
+        ? "平台要求先通过人机验证才肯发短信，服务端直连无法完成这一步。请改用「从手机/模拟器导入」或在设置页粘贴 Cookie 登录。"
+        : code === 7
+          ? "请求太频繁，请等几分钟再试。"
+          : code === 1001
+            ? "这个手机号已绑定其他账号，请换一个或先在官方 App 里处理。"
+            : payload.description || data.message || "验证码发送失败，请稍后重试";
+    return { ok: false, message, code };
   }
   return {
     ok: true,

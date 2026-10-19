@@ -140,7 +140,16 @@ export function SmsLogin({
               : {}),
           }}
         >
-          {message}
+          <span>
+            {message}
+            {failed && /人机验证|captcha/i.test(message) && (
+              <>
+                {" "}
+                这两条路不受影响：下方「从手机 / 模拟器导入」，
+                或「账号 Cookie」里手动粘贴。
+              </>
+            )}
+          </span>
         </div>
       )}
 
