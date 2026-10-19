@@ -46,7 +46,12 @@ export function SmsLogin({
       setMessage(data.message);
     } catch (problem) {
       setFailed(true);
-      setMessage(problem instanceof Error ? problem.message : "验证码发送失败");
+      const text = problem instanceof Error ? problem.message : "验证码发送失败";
+      setMessage(text);
+      // 冷却期（1206）时平台仍会下发 ticket，把它留住，用户填已有验证码也能登录。
+      const ticket = (problem as { mobileTicket?: string })?.mobileTicket;
+      if (ticket) setSmsCodeKey(ticket);
+      if (/等一会儿|太频繁/.test(text)) setCooldown(60);
     } finally {
       setBusy("none");
     }

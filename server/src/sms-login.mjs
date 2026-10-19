@@ -105,6 +105,10 @@ export async function sendLoginCode(mobile) {
     return { ok: false, message: "手机号要 11 位、以 1 开头" };
 
   const identity = await deps.ensureIdentity();
+  // type 决定短信用途。实测（2026-10-19）：
+  //   24 / 19 → 1204 需要人机验证，发不出来；
+  //   8       → 换绑手机号流程，会提示「已绑定到某账号」；
+  //   101     → 登录验证码，能真正下发（冷却期内回 1206）。
   const data = await postForm(
     "/passport/mobile/send_code/v1/",
     identityValues(identity),
@@ -114,8 +118,7 @@ export async function sendLoginCode(mobile) {
       passport_support_flow: "captcha,verify",
       mix_mode: "1",
       auto_read: "0",
-      unbind_exist: "34",
-      type: "24",
+      type: "101",
     }
   );
   const payload = data.data || {};
@@ -123,19 +126,23 @@ export async function sendLoginCode(mobile) {
     const code = Number(payload.error_code || 0);
     // 把平台错误码翻译成用户能理解、能照做的提示。
     const message =
-      code === 1204
-        ? "平台要求先通过人机验证才肯发短信，服务端直连无法完成这一步。请改用「从手机/模拟器导入」或在设置页粘贴 Cookie 登录。"
-        : code === 7
-          ? "请求太频繁，请等几分钟再试。"
-          : code === 1001
-            ? "这个手机号已绑定其他账号，请换一个或先在官方 App 里处理。"
-            : payload.description || data.message || "验证码发送失败，请稍后重试";
-    return { ok: false, message, code };
+      code === 1206
+        ? "这个号码刚发过验证码，平台要求等一会儿再发（通常是 60 秒到几分钟）。收到过就直接填验证码，没收到就稍后再点一次。"
+        : code === 1204
+          ? "平台要求先通过人机验证才肯发短信。请改用「从手机/模拟器导入」或在设置页粘贴 Cookie 登录。"
+          : code === 7
+            ? "请求太频繁，请等几分钟再试。"
+            : code === 1057
+              ? "这个手机号已绑定到另一个红果账号，请先在官方 App 里处理绑定关系。"
+              : code === 1001
+                ? "这个手机号已绑定其他账号，请换一个或先在官方 App 里处理。"
+                : payload.description || data.message || "验证码发送失败，请稍后重试";
+    return { ok: false, message, code, mobileTicket: payload.mobile_ticket || "" };
   }
   return {
     ok: true,
     mobile: phone,
-    smsCodeKey: payload.sms_code_key || "",
+    smsCodeKey: payload.sms_code_key || payload.mobile_ticket || "",
     retryAfter: Number(payload.retry_time || 60),
     message: `验证码已发到 ${phone}`,
   };
@@ -170,11 +177,14 @@ export async function loginWithCode({ mobile, code, smsCodeKey }) {
   );
   const payload = data.data || {};
   if (data.message !== "success") {
-    return {
-      ok: false,
-      message: payload.description || data.message || "验证失败，请检查验证码或稍后重试",
-      code: payload.error_code,
-    };
+    const code = Number(payload.error_code || 0);
+    const message =
+      code === 1066
+        ? "验证码已过期或还没收到。请重新点「获取验证码」，并在 10 分钟内输入。"
+        : code === 1204 || code === 1206
+          ? "验证码不正确或已失效，请检查后重试。"
+          : payload.description || data.message || "登录失败，请检查验证码或稍后重试";
+    return { ok: false, message, code };
   }
   const sessionId = payload.sessionid || payload.sid_tt || "";
   if (!sessionId) {

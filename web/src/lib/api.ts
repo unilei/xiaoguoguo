@@ -66,10 +66,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!response.ok) {
     // 后端两种失败形态：{ error } 和 { ok:false, message }，都要把真实原因带出来。
-    const payload = data as { error?: string; message?: string } | null;
-    throw new Error(
+    // 有些错误还带着可继续使用的字段（如短信冷却期的 mobileTicket），挂到 error 上。
+    const payload = data as
+      | { error?: string; message?: string; code?: number; mobileTicket?: string }
+      | null;
+    const failure = new Error(
       payload?.error || payload?.message || `请求失败（${response.status}）`
-    );
+    ) as Error & { code?: number; mobileTicket?: string };
+    if (payload?.code !== undefined) failure.code = payload.code;
+    if (payload?.mobileTicket) failure.mobileTicket = payload.mobileTicket;
+    throw failure;
   }
   return data as T;
 }
@@ -112,6 +118,8 @@ export const api = {
       smsCodeKey: string;
       retryAfter: number;
       message: string;
+      /** 冷却期（1206）时平台仍会下发 ticket，可直接用来登录。 */
+      mobileTicket?: string;
     }>("/api/account/sms/send", {
       method: "POST",
       body: JSON.stringify({ mobile }),
