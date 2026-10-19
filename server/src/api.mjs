@@ -112,7 +112,15 @@ export async function handleApi(request) {
       service: "xiaoguoguo",
       version: "0.1.0",
       apiVersion: 1,
-      runtime: process.env.VERCEL ? "vercel" : "node",
+      // Vercel 会注入 VERCEL=1，但不同版本/本地 vercel dev 可能缺失，
+      // 因此再看几个只在该平台存在的环境变量。
+      runtime:
+        process.env.VERCEL ||
+        process.env.VERCEL_ENV ||
+        process.env.VERCEL_URL ||
+        process.env.NOW_REGION
+          ? "vercel"
+          : "node",
       account: hasAccountCookie() ? "configured" : "anonymous",
       expiry: sessionExpiry(accountCookieSnapshot()),
     });
