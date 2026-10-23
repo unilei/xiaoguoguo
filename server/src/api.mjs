@@ -288,7 +288,8 @@ export async function handleApi(request) {
     const type = String(searchParams.get("type") || "real-drama");
     const sub = String(searchParams.get("sub") || "").trim();
     const page = Number(searchParams.get("page") || 1);
-    if (!Number.isInteger(page) || page < 1 || page > 100)
+    // 分类页做了子分类聚合，页数远超源站的 34 页上限
+    if (!Number.isInteger(page) || page < 1 || page > 1000)
       return jsonResponse(400, { error: "分页参数无效" });
     if (sub.length > 40) return jsonResponse(400, { error: "子分类参数无效" });
     return jsonResponse(200, await category(type, sub, page));

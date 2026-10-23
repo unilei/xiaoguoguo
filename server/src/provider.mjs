@@ -387,6 +387,10 @@ export async function search(keyword, page = 1) {
   let result = null;
   try {
     const identity = await ensureIdentity();
+    // 搜索是游标分页：只传 offset 不带 search_id/passback 时，
+    // 第 2 页起会返回与上一页完全相同的数据（实测 17/17 重复）。
+    // 所以先取上一页的游标，再发当前页请求。
+    const cursor = page > 1 ? await searchCursor(query, page - 1) : {};
     const values = {
       ...api.APP_DEVICE,
       device_id: identity.deviceId,
@@ -398,6 +402,8 @@ export async function search(keyword, page = 1) {
       bookshelf_search_plan: "4",
       use_correct: "true",
       user_is_login: accountCookie ? "1" : "0",
+      ...(cursor.search_id ? { search_id: cursor.search_id } : {}),
+      ...(cursor.passback ? { passback: cursor.passback } : {}),
     };
     const signed = signedRequest(APP_SEARCH_API, values, null);
     if (identity.cookie) signed.headers.Cookie = identity.cookie;
@@ -423,7 +429,10 @@ export async function search(keyword, page = 1) {
             }
           }
         }
-        // App 搜索给的封面是带签名的 HEIC，浏览器不能显示；用官网详情页的 JPEG 封面替换。
+        // appSearchVod 返回的已经是 {url,title,img,desc,tname,content}，
+        // 直接转成卡片结构；走 toSeries 会取不到字段（它读的是 SSR 的 item）。
+        // App 搜索的封面是 HEIC，浏览器不认（HTTP 200 但显示不出来），
+        // 换成官网详情页的 JPEG 封面。
         const items = await Promise.all(
           rows.map(async (row) => {
             const base = {
@@ -436,8 +445,8 @@ export async function search(keyword, page = 1) {
             };
             if (!/\.heic(\?|$)/i.test(base.cover)) return base;
             try {
-              const page = await api.routerData(`${SITE}/detail?series_id=${row.url}`);
-              const series = page?.loaderData?.detail_page?.seriesDetail;
+              const detail = await api.routerData(`${SITE}/detail?series_id=${row.url}`);
+              const series = detail?.loaderData?.detail_page?.seriesDetail;
               if (series?.series_cover) base.cover = api.cleanUrl(series.series_cover);
             } catch {
               // 拿不到官网封面时保留原值，前端会退化成占位图。
@@ -449,11 +458,17 @@ export async function search(keyword, page = 1) {
           items: validSeries(items),
           page,
           hasMore: Boolean(tab.has_more),
+          cursor: {
+            search_id: String(tab.search_id || ""),
+            passback: String(tab.passback || ""),
+            next_offset: String(tab.next_offset || ""),
+          },
         };
       }
     }
-  } catch {
+  } catch (error) {
     // 回退到官网搜索。
+    if (process.env.DEBUG_SEARCH) console.error("app search failed:", error?.message);
   }
 
   if (!result) {
@@ -472,6 +487,19 @@ export async function search(keyword, page = 1) {
   }
   cacheSet(homeCache, key, result);
   return result;
+}
+
+/** 取第 page 页的游标（结果已缓存，递归不会重复请求）。 */
+async function searchCursor(keyword, page) {
+  if (page < 1) return {};
+  const cached = cacheGet(homeCache, `search:${keyword}:${page}`);
+  if (cached?.cursor) return cached.cursor;
+  try {
+    const value = await search(keyword, page);
+    return value?.cursor || {};
+  } catch {
+    return {};
+  }
 }
 
 function toEpisodes(vidList) {
@@ -696,13 +724,8 @@ export async function rank(route = "hot-drama", page = 1) {
   return value;
 }
 
-export async function category(type, sub = "", page = 1) {
-  const label = CATEGORY_LABELS[type];
-  if (!label) throw new Error("不支持的分类");
-  const key = `category:${type}:${sub}:${page}`;
-  const cached = cacheGet(homeCache, key);
-  if (cached) return cached;
-
+/** 抓一页分类数据（不做缓存，供 category 与聚合逻辑共用）。 */
+async function fetchCategoryPage(type, sub, page) {
   // 子分类走 /category/<type>/<slug>；官网只给真人剧铺了子分类路由。
   const base = sub
     ? `${SITE}/category/${type}/${encodeURIComponent(sub)}`
@@ -714,9 +737,8 @@ export async function category(type, sub = "", page = 1) {
 
   const selector = pageData?.selectorList?.[0];
   const pagination = pageData?.pagination || {};
-  const value = {
-    type,
-    label: String(pageData?.categoryRoute?.displayName || label),
+  return {
+    label: String(pageData?.categoryRoute?.displayName || ""),
     seo: pageData?.seo || {},
     tags: Array.isArray(selector?.items)
       ? selector.items.map((item) => ({
@@ -725,9 +747,222 @@ export async function category(type, sub = "", page = 1) {
         }))
       : [],
     items: validSeries(rows.map(toSeries)),
-    page,
     total: Number(pagination.total || 0),
     totalPages: Number(pagination.totalPages || 1),
+  };
+}
+
+/**
+ * 分类页的总量被官网 SSR 卡在 800 条（24 条 × 34 页）。
+ * 这是「每个路由」的配额，不是片库总量——每个子分类有自己的
+ * total/totalPages 窗口，且彼此大量不重叠。实测真人剧 24 个子分类
+ * 并集约 1 万部，而大类只有 800 部。
+ *
+ * 但全量聚合撑不住深页：第 230 页要 5500 条，得抓几百个请求。
+ * 所以改成「按需分段」——把各子分类按配额首尾相接排成一条虚拟长表，
+ * 第 N 页落在哪个子分类的哪一页可以直接算出来，只抓那一段。
+ */
+const POOL_TTL = 10 * 60 * 1000;
+/** 单次补抓最多请求多少页，防止一次打爆源站 */
+const SEGMENT_FETCH_BUDGET = 40;
+const SEGMENT_CONCURRENCY = 3;
+
+/** type → { segments, seen, cache, meta, time } */
+const categoryPools = new Map();
+
+function poolGet(type) {
+  const hit = categoryPools.get(type);
+  if (hit && Date.now() - hit.time < POOL_TTL) return hit;
+  if (hit) categoryPools.delete(type);
+  return null;
+}
+
+/**
+ * 把各子分类的 total 首尾相接，算出一条虚拟长表。
+ * 返回 [{ sub, pages, count, offset }]，offset 是该子分类在长表里的起始位置。
+ */
+function buildSegments(first, probed) {
+  const segments = [
+    { sub: "", pages: first.totalPages, count: first.total, offset: 0 },
+  ];
+  let offset = first.total;
+  for (const item of probed) {
+    if (!item.total) continue;
+    segments.push({
+      sub: item.id,
+      pages: item.totalPages,
+      count: item.total,
+      offset,
+    });
+    offset += item.total;
+  }
+  return segments;
+}
+
+/** 探测各子分类的 total/totalPages（每个只抓第 1 页，很便宜）。 */
+async function probeTags(type, tags) {
+  const probed = [];
+  for (let i = 0; i < tags.length; i += 4) {
+    const batch = tags.slice(i, i + 4);
+    const results = await Promise.all(
+      batch.map((tag) =>
+        fetchCategoryPage(type, tag.id, 1).then(
+          (r) => ({ id: tag.id, total: r.total, totalPages: r.totalPages }),
+          () => null
+        )
+      )
+    );
+    for (const r of results) if (r && r.total > 0) probed.push(r);
+  }
+  return probed;
+}
+
+/**
+ * 取虚拟长表的 [start, start+size) 段。
+ * 只抓这段跨越的子分类页，不做全量聚合。
+ */
+async function fetchSegment(type, pool, start, size) {
+  const need = start + size;
+  const jobs = [];
+  for (const seg of pool.segments) {
+    const segEnd = seg.offset + seg.count;
+    if (segEnd <= start) continue;
+    if (seg.offset >= need) break;
+    // 这段覆盖到的子分类页范围
+    const localFrom = Math.max(0, start - seg.offset);
+    const localTo = Math.min(seg.count, need - seg.offset);
+    const pageFrom = Math.floor(localFrom / 24) + 1;
+    const pageTo = Math.ceil(localTo / 24);
+    for (let p = pageFrom; p <= pageTo; p += 1) {
+      const key = `${seg.sub}:${p}`;
+      if (pool.cache.has(key)) continue;
+      jobs.push({ key, sub: seg.sub, page: p });
+    }
+    if (jobs.length >= SEGMENT_FETCH_BUDGET) break;
+  }
+
+  // 按需抓取，结果按 id 去重后放进共享表
+  for (let i = 0; i < jobs.length; i += SEGMENT_CONCURRENCY) {
+    const batch = jobs.slice(i, i + SEGMENT_CONCURRENCY);
+    const results = await Promise.all(
+      batch.map((job) =>
+        fetchCategoryPage(type, job.sub, job.page).then(
+          (r) => ({ job, items: r.items }),
+          () => null
+        )
+      )
+    );
+    for (const r of results) {
+      if (!r) continue;
+      pool.cache.set(r.job.key, r.items);
+    }
+  }
+
+  // 按段顺序拼出这一页，跨段去重
+  const out = [];
+  const seen = new Set();
+  for (const seg of pool.segments) {
+    const segEnd = seg.offset + seg.count;
+    if (segEnd <= start) continue;
+    if (seg.offset >= need) break;
+    const localFrom = Math.max(0, start - seg.offset);
+    const localTo = Math.min(seg.count, need - seg.offset);
+    const pageFrom = Math.floor(localFrom / 24) + 1;
+    const pageTo = Math.ceil(localTo / 24);
+    for (let p = pageFrom; p <= pageTo; p += 1) {
+      const items = pool.cache.get(`${seg.sub}:${p}`);
+      if (!items) continue;
+      const base = (p - 1) * 24;
+      for (let idx = 0; idx < items.length; idx += 1) {
+        const pos = seg.offset + base + idx;
+        if (pos < start || pos >= need) continue;
+        const item = items[idx];
+        if (seen.has(item.id)) continue;
+        seen.add(item.id);
+        out.push(item);
+      }
+    }
+  }
+  return out.slice(0, size);
+}
+
+export async function category(type, sub = "", page = 1) {
+  const label = CATEGORY_LABELS[type];
+  if (!label) throw new Error("不支持的分类");
+  const key = `category:${type}:${sub}:${page}`;
+  const cached = cacheGet(homeCache, key);
+  if (cached) return cached;
+
+  // 子分类是独立的筛选视图，直接用源站那一页，不做聚合
+  if (sub) {
+    const single = await fetchCategoryPage(type, sub, page);
+    const value = {
+      type,
+      label: single.label || label,
+      seo: single.seo,
+      tags: single.tags,
+      items: single.items,
+      page,
+      total: single.total,
+      totalPages: single.totalPages,
+    };
+    cacheSet(homeCache, key, value);
+    return value;
+  }
+
+  const first = await fetchCategoryPage(type, "", 1);
+  const size = first.items.length || 24;
+
+  let pool = poolGet(type);
+  if (!pool) {
+    const probed = await probeTags(type, first.tags);
+    pool = {
+      segments: buildSegments(first, probed),
+      cache: new Map(),
+      meta: { label: first.label, seo: first.seo, tags: first.tags },
+      sourceTotal: first.total,
+      total: 0,
+      time: Date.now(),
+    };
+    pool.total = pool.segments.reduce((sum, seg) => sum + seg.count, 0);
+    categoryPools.set(type, pool);
+  }
+  pool.time = Date.now();
+
+  const totalPages = Math.max(1, Math.ceil(pool.total / size));
+
+  // 前 34 页源站能直接给，单抓一次更省
+  if (page <= first.totalPages) {
+    const single = page === 1 ? first : await fetchCategoryPage(type, "", page);
+    const value = {
+      type,
+      label: single.label || label,
+      seo: single.seo,
+      tags: single.tags,
+      items: single.items,
+      page,
+      total: pool.total,
+      totalPages,
+      aggregated: true,
+      sourceTotal: pool.sourceTotal,
+    };
+    cacheSet(homeCache, key, value);
+    return value;
+  }
+
+  // 超出源站的页：按虚拟长表定位，只抓这一段
+  const items = await fetchSegment(type, pool, (page - 1) * size, size);
+  const value = {
+    type,
+    label: pool.meta.label || label,
+    seo: pool.meta.seo,
+    tags: pool.meta.tags,
+    items,
+    page,
+    total: pool.total,
+    totalPages,
+    aggregated: true,
+    sourceTotal: pool.sourceTotal,
   };
   cacheSet(homeCache, key, value);
   return value;
