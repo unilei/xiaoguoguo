@@ -46,6 +46,12 @@ import {
   submitImport,
 } from "../server/src/import-session.mjs";
 import { expiredPage, importPage } from "../server/src/import-page.mjs";
+import {
+  home as providerHome,
+  detail as providerDetail,
+  category as providerCategory,
+  rank as providerRank,
+} from "./provider.js";
 
 const APP_SEARCH_API = "https://api5-normal-sinfonlinea.fqnovel.com/reading/bookapi/search/tab/v";
 
@@ -181,28 +187,27 @@ const toSeries = (row) => {
 
 const validSeries = (rows) => rows.filter((item) => /^\d{1,30}$/.test(item.id) && item.title);
 
-async function home(page) {
-  const data = await categoryPage("tab=1&sort_type=1", page);
-  const pageData =
-    data?.loaderData?.category_page ||
-    data?.loaderData?.["category_$"] ||
-    data?.loaderData?.category_layout;
-  const rows = pageData?.recommendList || pageData?.categoryData?.recommendList;
-  if (!Array.isArray(rows)) throw new Error("首页数据结构已变化");
-  return {
-    items: validSeries(rows.map(toSeries)),
-    page,
-    totalPages: Number(pageData?.pagination?.totalPages || 34),
-  };
-}
-
 async function search(env, keyword, page) {
   const query = String(keyword || "").trim();
   if (!query) throw new Error("请输入关键词");
   const accountCookie = await getAccountCookie(env);
+  const cacheKey = `search:${query}:${page}`;
+  const cached = await kvGet(env, cacheKey);
+  if (cached) {
+    try {
+      const hit = JSON.parse(cached);
+      if (Date.now() - hit.at < CACHE_TTL * 1000) return hit.value;
+    } catch {
+      // 坏缓存直接重算。
+    }
+  }
+
   let result = null;
   try {
     const identity = await ensureIdentity(env);
+    // 搜索是游标分页：只传 offset 不带 search_id/passback 时，
+    // 第 2 页起会返回与上一页完全相同的数据。先取上一页的游标。
+    const cursor = page > 1 ? await searchCursor(env, query, page - 1) : {};
     const values = {
       ...APP_DEVICE,
       device_id: identity.deviceId,
@@ -214,6 +219,8 @@ async function search(env, keyword, page) {
       bookshelf_search_plan: "4",
       use_correct: "true",
       user_is_login: accountCookie ? "1" : "0",
+      ...(cursor.search_id ? { search_id: cursor.search_id } : {}),
+      ...(cursor.passback ? { passback: cursor.passback } : {}),
     };
     const signed = signedRequest(APP_SEARCH_API, values, null);
     if (accountCookie) signed.headers.Cookie = accountCookie;
@@ -235,25 +242,40 @@ async function search(env, keyword, page) {
               rows.push(vod);
             }
           }
+        // App 搜索封面是 HEIC，浏览器显示不出来，换成官网的 JPEG。
+        // Workers 并发受限，这里串行抓（每页最多 20 条，其中只有少数是 HEIC），
+        // 失败时重试一次；仍失败就把封面清空，让前端走占位图而不是破图。
+        const items = [];
+        for (const row of rows) {
+          const base = {
+            id: String(row.url),
+            title: String(row.title || ""),
+            cover: row.img || "",
+            description: row.content || "",
+            badge: row.desc || "",
+            tags: row.tname || "",
+          };
+          if (/\.heic(\?|$)/i.test(base.cover)) {
+            base.cover = await resolveCover(row.url, base.cover);
+          }
+          items.push(base);
+        }
         result = {
-          items: validSeries(
-            rows.map((row) => ({
-              id: String(row.url),
-              title: String(row.title || ""),
-              cover: row.img || "",
-              description: row.content || "",
-              badge: row.desc || "",
-              tags: row.tname || "",
-            }))
-          ),
+          items: validSeries(items),
           page,
           hasMore: Boolean(tab.has_more),
+          cursor: {
+            search_id: String(tab.search_id || ""),
+            passback: String(tab.passback || ""),
+          },
         };
       }
     }
-  } catch {
+  } catch (error) {
     // 退回官网搜索。
+    console.error("app search failed:", error?.message, error?.stack?.split("\n")[1]);
   }
+
   if (!result) {
     const data = await routerData(`${SITE}/search/${encodeURIComponent(query)}?page=${page}`);
     const pageData =
@@ -262,25 +284,45 @@ async function search(env, keyword, page) {
     if (!Array.isArray(rows)) throw new Error("搜索数据不可用");
     result = { items: validSeries(rows.map(toSeries)), page, hasMore: false };
   }
+
+  await kvPut(env, cacheKey, JSON.stringify({ at: Date.now(), value: result }));
   return result;
 }
 
-async function detail(id) {
-  if (!/^\d{1,30}$/.test(String(id))) throw new Error("剧集 ID 无效");
-  const data = await routerData(`${SITE}/detail?series_id=${id}`);
-  const series = data?.loaderData?.detail_page?.seriesDetail;
-  if (!series || !Array.isArray(series.vid_list) || !series.vid_list.length)
-    throw new Error("剧集不存在或分集暂不可用");
-  const episodes = Array.from(series.vid_list, (vid, index) => ({
-    id: String(vid),
-    title: `第 ${index + 1} 集`,
-    number: index + 1,
-  }));
-  return {
-    ...toSeries({ ...series, series_id: series.series_id || id }),
-    id: String(id),
-    episodes,
-  };
+/** HEIC 封面换成官网 JPEG；两次都失败就返回空串（前端显示占位图）。 */
+async function resolveCover(seriesId, fallback) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const page = await routerData(`${SITE}/detail?series_id=${seriesId}`);
+      const series = page?.loaderData?.detail_page?.seriesDetail;
+      const cover = cleanUrl(series?.series_cover);
+      if (cover && !/\.heic(\?|$)/i.test(cover)) return cover;
+    } catch {
+      // 再试一次。
+    }
+  }
+  // 换不到就放弃这张图，别把 HEIC 丢给浏览器
+  return "";
+}
+
+/** 取第 page 页的游标（结果已缓存，递归不会重复请求）。 */
+async function searchCursor(env, keyword, page) {
+  if (page < 1) return {};
+  const cached = await kvGet(env, `search:${keyword}:${page}`);
+  if (cached) {
+    try {
+      const hit = JSON.parse(cached);
+      if (hit.value?.cursor) return hit.value.cursor;
+    } catch {
+      // 忽略。
+    }
+  }
+  try {
+    const value = await search(env, keyword, page);
+    return value?.cursor || {};
+  } catch {
+    return {};
+  }
 }
 
 // ---------------------------------------------------------------- 播放
@@ -517,7 +559,7 @@ async function handle(request, env) {
   if (path === "/api/home") {
     const page = Number(url.searchParams.get("page") || 1);
     if (!Number.isInteger(page) || page < 1 || page > 100) return json(400, { error: "分页参数无效" });
-    return json(200, await home(page));
+    return json(200, await providerHome(env, page));
   }
 
   if (path === "/api/search") {
@@ -528,8 +570,27 @@ async function handle(request, env) {
     return json(200, await search(env, keyword, page));
   }
 
+  if (path === "/api/category") {
+    const type = String(url.searchParams.get("type") || "real-drama");
+    const sub = String(url.searchParams.get("sub") || "").trim();
+    const page = Number(url.searchParams.get("page") || 1);
+    // 分类做了子分类聚合，页数远超源站的 34 页
+    if (!Number.isInteger(page) || page < 1 || page > 1000)
+      return json(400, { error: "分页参数无效" });
+    if (sub.length > 40) return json(400, { error: "子分类参数无效" });
+    return json(200, await providerCategory(env, type, sub, page));
+  }
+
+  if (path === "/api/rank") {
+    const route = String(url.searchParams.get("key") || "hot-drama");
+    const page = Number(url.searchParams.get("page") || 1);
+    if (!Number.isInteger(page) || page < 1 || page > 100)
+      return json(400, { error: "分页参数无效" });
+    return json(200, await providerRank(env, route, page));
+  }
+
   const detailMatch = /^\/api\/series\/(\d{1,30})$/.exec(path);
-  if (detailMatch) return json(200, await detail(detailMatch[1]));
+  if (detailMatch) return json(200, await providerDetail(env, detailMatch[1]));
 
   if (path === "/api/account" && method === "POST") {
     const body = await readJson(request);

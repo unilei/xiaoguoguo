@@ -9,8 +9,11 @@
 
 | 能力 | 结果 |
 | --- | --- |
-| 首页、详情 | 正常 |
-| 搜索（签名接口） | 正常 |
+| 首页 | 正常 |
+| 分类（含 1.1 万部聚合） | 正常，深页 1.2 秒 |
+| 榜单 | 正常 |
+| 详情（评分/热度/评论/演员） | 正常 |
+| 搜索（签名 + 游标翻页） | 正常，跨页零重复 |
 | 播放地址解析 | 正常 |
 | 视频分段流（Range / 206） | 正常，ffprobe 确认 H.264 + AAC |
 | 静态资源 + SPA 路由 | 正常 |
@@ -20,14 +23,20 @@
 
 ## 关键改造
 
-Cloudflare Workers 与 Node 有三处不兼容，都已处理：
+Cloudflare Workers 与 Node 有五处不兼容，都已处理：
 
 1. **禁止运行时动态执行代码**。Workers 里 `eval` / `new Function` / `node:vm`
    都不可用，而原实现用 `vm.runInContext` 加载 vendor。
    解决：`worker/build-vendor.mjs` 把 vendor 静态转换成 ES 模块。
 2. **`node:crypto` 没有 sm3**（实测报 `Digest method not supported`）。
    解决：`server/src/sm3.mjs` 是纯 JS 的 SM3 实现，已与 Node 原生结果逐字节对照通过。
-3. **内存态在边缘节点间不共享**。设备身份和账号 Cookie 改为存 KV。
+3. **内存态在边缘节点间不共享**。设备身份、账号 Cookie、各类缓存改为存 KV。
+4. **ESM 模块里没有 `crypto` 全局**。vendor 原本从沙箱注入拿到它，
+   静态转换后必须显式 `import nodeCrypto from "node:crypto"` 再赋给同名变量，
+   否则签名报 `crypto.createHash is not a function`（搜索、播放全挂）。
+5. **单请求最多 50 个子请求**。分类页的「子分类聚合」要探测 24 个子分类，
+   不能每个请求都实时探测，所以把分段表缓存到 KV（1 小时），
+   按页只补抓跨越的那 1–2 页。
 
 其余（`node:crypto` 的 md5 / sha512 / AES-CBC / AES-CTR、`node:zlib`、Buffer）
 在 Workers 里都原生支持，实测通过。

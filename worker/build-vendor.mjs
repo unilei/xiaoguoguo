@@ -23,7 +23,13 @@ const body = source
 
 const header = `// 由 build-vendor.mjs 从 server/src/vendor/hongguo.cjs 生成，请勿手改。
 // 原文件：woshishiq1/drpys（GPL-3.0），见 server/src/vendor/NOTICE.md。
+import nodeCrypto from "node:crypto";
 import { sm3 as pureSm3 } from "../server/src/sm3.mjs";
+
+// vendor 原本从沙箱注入拿到 crypto（原文件顶部 require('node:crypto') 已被去掉）。
+// ESM 里没有这个全局，必须显式导入后赋给同名变量，否则签名会报
+// "crypto.createHash is not a function"。
+const crypto = nodeCrypto;
 
 // vendor 原先把 axios 当作沙箱注入的全局；Workers 里用 fetch 实现同样的调用形态。
 const axios = async (url, options = {}) => {
@@ -61,7 +67,7 @@ const footer = `
 export {
   SITE, VIDEO_API, APP_SEARCH_API, VIDEO_UA, APP_UA, DEVICE, APP_DEVICE,
   categoryPage, categoryData, itemToCard, appSearchPage, appSearchCells, appSearchVod,
-  routerData, pythonUrlEncode, xGorgon, helios, buildMedusa, be32, le32, branchOf,
+  routerData, rankData, pythonUrlEncode, xGorgon, helios, buildMedusa, be32, le32, branchOf,
   cleanUrl, str, qualityRows, qualityNumber, qualityLabel, deriveContentKey,
   decryptSpadeUrl, prepareCencHeader, decryptPartial, getText,
 };
