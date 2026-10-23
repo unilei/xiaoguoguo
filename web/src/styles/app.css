@@ -1,0 +1,82 @@
+/* ============================================================
+   React 版补充样式
+   复刻站的 site.css / routes.css 原样复用，这里只补 SPA 化必须的几处。
+   ============================================================ */
+
+/* 复刻站用 body.route-page 区分「子路由页」和「首页」，
+   React 里由 Shell 按当前路由加类，规则保持一致。 */
+html.is-mobile body.route-page {
+  background: #131414;
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
+/* 播放页整屏：去掉页脚后需要自己撑满视口。
+   底色沿用 #131414，和复刻站一致；设成纯黑会让固定页头（透明）
+   在顶部露出一条比页面更黑的色带。 */
+body.player-body { background: #131414; }
+
+/* 首页在移动端：隐藏 PC 内容区、显示 mobile-shell。
+   注意不能对 .pc-shell 本身设 display:none——mobile-shell 嵌在它内部，
+   父级 none 会让子元素宽度算成 0，整屏空白。
+   复刻站能这么写是因为它的 mobile-shell 是 .pc-shell 的兄弟节点。 */
+html.is-mobile body.home-page .pc-shell > .site-header,
+html.is-mobile body.home-page .pc-shell > .hero-banner,
+html.is-mobile body.home-page .pc-shell > .main-page,
+html.is-mobile body.home-page .pc-shell > .footer-page { display: none; }
+html.is-mobile body.home-page .pc-shell { min-width: 0; }
+html.is-mobile body.home-page .mobile-shell { display: block; }
+
+/* 播放页不跟随 .pc-shell 的 min-width:1240px：
+   那是原站给内容页设的，播放页是整屏布局，窗口窄于 1240 时
+   强行撑宽会产生横向滚动条。 */
+body.player-body .pc-shell { min-width: 0; }
+
+/* 拖拽跟手位移：切集时由 JS 写 --drag-y，松手归零 */
+.player-frame {
+  transform: translate3d(0, var(--drag-y, 0px), 0);
+}
+
+/* 选集/分组按钮用 <button> 渲染，去掉浏览器默认外观 */
+.player-ep,
+.player-ep-group {
+  font-family: inherit;
+}
+
+/* 详情页「查看更多」是 <button>，视觉上要和原来的链接一致 */
+.detail-section-more {
+  background: transparent;
+  border: 0;
+  color: hsla(0, 0%, 100%, .5);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0;
+}
+.detail-section-more:hover { color: hsla(0, 0%, 100%, .8); }
+
+/* 加载 / 错误状态：复刻站的 .state 是给页面根用的，SPA 里需要一点上下留白 */
+.state {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  justify-content: center;
+  min-height: 320px;
+  padding: 80px 24px;
+  text-align: center;
+}
+.state h2 { font-size: 20px; font-weight: 600; margin: 0; }
+.state p { color: hsla(0, 0%, 100%, .5); font-size: 14px; margin: 0; max-width: 520px; }
+.spinner {
+  animation: pcSpin .8s linear infinite;
+  border: 2px solid hsla(0, 0%, 100%, .16);
+  border-radius: 50%;
+  border-top-color: #fa7705;
+  height: 32px;
+  width: 32px;
+}
+@keyframes pcSpin { to { transform: rotate(360deg); } }
+
+/* 复刻站的分页里，折叠省略号是可点的 */
+.pagination a,
+.pagination span { display: inline-flex; }

@@ -1,43 +1,38 @@
-import { StrictMode } from "react";
-import { createRoot } from "react-dom/client";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
-import "./styles.css";
-import { Footer, Header } from "./components/Layout";
-import { HomePage } from "./pages/HomePage";
-import { SearchPage } from "./pages/SearchPage";
-import { DetailPage } from "./pages/DetailPage";
-import { WatchPage } from "./pages/WatchPage";
-import { LibraryPage } from "./pages/LibraryPage";
-import { SettingsPage } from "./pages/SettingsPage";
-import { EmptyState } from "./components/Poster";
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import './styles/site.css';
+import './styles/routes.css';
+import './styles/app.css';
+import { Shell } from './Shell';
+import { HomePage } from './pages/HomePage';
+import { CategoryPage } from './pages/CategoryPage';
+import { RankPage } from './pages/RankPage';
+import { DetailPage } from './pages/DetailPage';
+import { WatchPage } from './pages/WatchPage';
+import { SearchPage } from './pages/SearchPage';
+import { PageEmpty } from './components/States';
 
-function Shell() {
-  return (
-    <div className="app-shell">
-      <Header />
-      <main className="page">
-        <Routes>
-          <Route path="/" element={<HomePage />} />
-          <Route path="/search" element={<SearchPage />} />
-          <Route path="/series/:id" element={<DetailPage />} />
-          <Route path="/watch/:id/:episodeId" element={<WatchPage />} />
-          <Route path="/library" element={<LibraryPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-          <Route
-            path="*"
-            element={<EmptyState title="页面不存在" hint="检查地址，或回到首页继续浏览。" />}
-          />
-        </Routes>
-      </main>
-      <Footer />
-    </div>
-  );
-}
-
-createRoot(document.getElementById("root")!).render(
+createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <BrowserRouter>
-      <Shell />
+      <Routes>
+        <Route element={<Shell />}>
+          <Route path="/" element={<HomePage />} />
+          <Route path="/category" element={<Navigate to="/category/real-drama" replace />} />
+          <Route path="/category/:type" element={<CategoryPage />} />
+          <Route path="/category/:type/:sub" element={<CategoryPage />} />
+          <Route path="/rank" element={<Navigate to="/rank/hot-drama" replace />} />
+          <Route path="/rank/:key" element={<RankPage />} />
+          <Route path="/detail/:id" element={<DetailPage />} />
+          <Route path="/player/:id" element={<WatchPage />} />
+          <Route path="/search" element={<SearchPage />} />
+          <Route
+            path="*"
+            element={<PageEmpty title="页面不存在" hint="检查地址，或回到首页继续浏览。" />}
+          />
+        </Route>
+      </Routes>
     </BrowserRouter>
   </StrictMode>
 );

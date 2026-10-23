@@ -119,10 +119,50 @@ function makeAxios() {
 
 // ---------------------------------------------------------------- 设备身份
 
-// 注册结果按进程保存；重启后重新注册。设备注册是匿名且一次请求即可，
-// 不落盘可以避免把身份信息写进仓库或日志。
+// 设备身份必须跨重启保持稳定。平台把发码凭证（sms_code_key）绑定在 device_id 上，
+// 每次重启都重新注册一台新设备会让用户手里的凭证立刻失效，表现为
+// 「短信刚收到却提示验证码过期」。所以本地部署时把身份落到数据目录，
+// 重启后复用同一台设备；Serverless 无共享磁盘，仍靠 x-xgg-device 头在请求间传递。
 let identity = null;
 let identityPromise = null;
+
+function identityFile() {
+  return String(process.env.DEVICE_IDENTITY_FILE || "").trim();
+}
+
+function loadStoredIdentity() {
+  const file = identityFile();
+  if (!file) return null;
+  try {
+    const data = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (!data?.deviceId || !data?.installId) return null;
+    return {
+      deviceId: String(data.deviceId),
+      installId: String(data.installId),
+      cookie: String(data.cookie || ""),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function storeIdentity(value) {
+  const file = identityFile();
+  if (!file) return;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const temp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(temp, JSON.stringify(value), { mode: 0o600 });
+    fs.renameSync(temp, file);
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "identity_persist_failed",
+        message: error instanceof Error ? error.message : String(error),
+      })
+    );
+  }
+}
 
 // 请求级身份：由 api.mjs 从请求头读入后设置，优先于进程内缓存。
 // 这样无状态的 Serverless 多实例也能保证同一用户使用同一台设备。
@@ -137,6 +177,12 @@ export async function ensureIdentity() {
   if (identity) return identity;
   if (!identityPromise) {
     identityPromise = (async () => {
+      // 先看磁盘上有没有上次注册的设备；有就复用，避免作废用户手里的凭证。
+      const stored = loadStoredIdentity();
+      if (stored) {
+        identity = stored;
+        return identity;
+      }
       const { registerDevice } = await import("./device-register.mjs");
       const registered = await registerDevice();
       identity = {
@@ -146,6 +192,7 @@ export async function ensureIdentity() {
           .map(([name, value]) => `${name}=${value}`)
           .join("; "),
       };
+      storeIdentity(identity);
       return identity;
     })().finally(() => {
       identityPromise = null;
@@ -156,10 +203,65 @@ export async function ensureIdentity() {
 
 // 账号 Cookie（可选）：用户从浏览器/客户端导出后填进设置，用于解锁非公开集。
 // 播放接口对 x-tt-token 的长度敏感，因此只发 Cookie 头，不发 x-tt-token。
+//
+// 持久化：本地部署时写进数据目录（权限 0600），重启后自动恢复，不用每次重填。
+// Serverless 多实例没有共享磁盘，这时用环境变量 ACCOUNT_COOKIE 注入。
+// 无论哪种方式都不通过接口回传完整 Cookie。
 let accountCookie = "";
+
+// 惰性读取：入口文件会先 import 本模块再设置 ACCOUNT_COOKIE_FILE，因此不能在
+// 模块顶层求值。
+function cookieFile() {
+  return String(process.env.ACCOUNT_COOKIE_FILE || "").trim();
+}
+
+function cookieEnv() {
+  return String(process.env.ACCOUNT_COOKIE || "").trim();
+}
+
+function readCookieFile() {
+  const file = cookieFile();
+  if (!file) return "";
+  try {
+    return fs.readFileSync(file, "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+function writeCookieFile(value) {
+  const file = cookieFile();
+  if (!file) return;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    if (!value) {
+      fs.rmSync(file, { force: true });
+      return;
+    }
+    // 先写临时文件再改名，避免进程中断留下半截凭据。
+    const temp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(temp, value, { mode: 0o600 });
+    fs.renameSync(temp, file);
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "cookie_persist_failed",
+        message: error instanceof Error ? error.message : String(error),
+      })
+    );
+  }
+}
+
+/** 进程启动时恢复登录态：环境变量优先，其次磁盘。 */
+export function restoreAccountCookie() {
+  accountCookie = cookieEnv() || readCookieFile();
+  return Boolean(accountCookie);
+}
 
 export function setAccountCookie(value) {
   accountCookie = String(value || "").trim();
+  // 环境变量注入的凭据视为部署配置，运行时改它没有意义，也不该覆盖。
+  if (!cookieEnv()) writeCookieFile(accountCookie);
   playbackCache.clear();
 }
 
@@ -372,13 +474,8 @@ export async function search(keyword, page = 1) {
   return result;
 }
 
-export async function detail(id) {
-  if (!/^\d{1,30}$/.test(String(id))) throw new Error("剧集 ID 无效");
-  const data = await api.routerData(`${SITE}/detail?series_id=${id}`);
-  const series = data?.loaderData?.detail_page?.seriesDetail;
-  if (!series || !Array.isArray(series.vid_list) || !series.vid_list.length)
-    throw new Error("剧集不存在或分集暂不可用");
-  const episodes = Array.from(series.vid_list, (vid, index) => ({
+function toEpisodes(vidList) {
+  const episodes = Array.from(vidList || [], (vid, index) => ({
     id: String(vid),
     title: `第 ${index + 1} 集`,
     number: index + 1,
@@ -388,11 +485,252 @@ export async function detail(id) {
     new Set(episodes.map((episode) => episode.id)).size !== episodes.length
   )
     throw new Error("分集数据异常");
+  return episodes;
+}
+
+export async function detail(id) {
+  if (!/^\d{1,30}$/.test(String(id))) throw new Error("剧集 ID 无效");
+  const data = await api.routerData(`${SITE}/detail?series_id=${id}`);
+  const page = data?.loaderData?.detail_page;
+  const series = page?.seriesDetail;
+  if (!series || !Array.isArray(series.vid_list) || !series.vid_list.length)
+    throw new Error("剧集不存在或分集暂不可用");
+
+  // 评分 / 点赞 / 评论在 seriesSocialInfo 里；榜单标签也在这里。
+  const social = page?.seriesSocialInfo || {};
+  const reviews = Array.isArray(social.reviews?.reviews) ? social.reviews.reviews : [];
+  const celebrities = Array.isArray(series.celebrities)
+    ? series.celebrities.map((item) => ({
+        name: String(item?.nickname || ""),
+        avatar: api.cleanUrl(item?.avatar) || "",
+        role: String(item?.sub_title || ""),
+      }))
+    : [];
+
   return {
     ...toSeries({ series_id: series.series_id || id, ...series, series_name: series.series_name }),
     id: String(id),
-    episodes,
+    episodes: toEpisodes(series.vid_list),
+    episodeCount: Number(series.episode_cnt || series.vid_list.length),
+    accessibleEpisodes: Number(series.accessible_episode_cnt || 0),
+    celebrities,
+    social: {
+      rating: Number(social.rating || 0) || null,
+      likeCount: String(social.series_like_count || ""),
+      favoriteCount: String(social.series_favorite_count || ""),
+      ratingCount: String(social.rating_count || ""),
+      rankLabel: String(social.rank_label || ""),
+      hotText: String(social.hot_score_data?.text || ""),
+      reviewTotal: Number(social.reviews?.total_count || reviews.length) || 0,
+      reviews: reviews.slice(0, 20).map((item) => ({
+        content: String(item?.content || ""),
+        user: String(item?.user_name || ""),
+        avatar: api.cleanUrl(item?.user_avatar) || "",
+        // 平台是 10 分制，前端按 5 星展示。
+        stars: Math.max(0, Math.min(5, Math.round(Number(item?.rating || 0) / 2))),
+        digg: Number(item?.digg_count || 0),
+      })),
+    },
   };
+}
+
+// ---------------------------------------------------------------- 分类与榜单
+
+// 分类路由直接对应官网路径：/category/<type>[/<sub>]。官网只认 page 参数，
+// 带上 tab / sort_type 反而会 404。
+const CATEGORY_LABELS = {
+  "real-drama": "真人剧",
+  "comic-drama": "漫剧",
+  "ai-drama": "AI剧",
+  comic: "漫画",
+};
+
+const RANK_ROUTES = new Set([
+  "hot-drama",
+  "hot-real-drama",
+  "hot-ai-drama",
+  "hot-comic-drama",
+]);
+
+/**
+ * 官网榜单页有两种 SSR 形态，同一个路由会随请求切换：
+ *   1. <script data-fn-name="r" data-fn-args='["rank_xx/page","content",{...}]'>
+ *   2. <script data-fn-name="mergeLoaderData" data-fn-args="[&quot;rank_xx/page&quot;,[{…routerDataFnArgs:[&quot;{…}&quot;]}]]">
+ * 第二种把 payload 再包了一层字符串，所以统一从这里捞 rankList。
+ */
+function decodeEntities(value) {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;|&#39;/g, "'")
+    .replace(/&#x2F;|&#47;/gi, "/")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+function findRankList(node, depth = 0) {
+  if (!node || depth > 6) return null;
+  if (typeof node === "string") {
+    // routerDataFnArgs 里装的是被转义成字符串的 JSON。
+    if (!node.includes("rankList")) return null;
+    try {
+      return findRankList(JSON.parse(node), depth + 1);
+    } catch {
+      return null;
+    }
+  }
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const found = findRankList(item, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof node !== "object") return null;
+  if (node.isSuccess && Array.isArray(node.rankList)) return node;
+  for (const value of Object.values(node)) {
+    const found = findRankList(value, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+function parseRankPayload(html) {
+  const patterns = [
+    /data-fn-name="r"[^>]*data-fn-args='([^']+)'/,
+    /data-fn-name="mergeLoaderData"[^>]*data-fn-args="([^"]+)"/,
+    /data-fn-name="r"[^>]*data-fn-args="([^"]+)"/,
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(html);
+    if (!match) continue;
+    let args;
+    try {
+      args = JSON.parse(decodeEntities(match[1]));
+    } catch {
+      continue;
+    }
+    const payload = findRankList(args);
+    if (payload) return payload;
+  }
+  throw new Error("榜单页面没有数据");
+}
+
+export async function rank(route = "hot-drama", page = 1) {
+  if (!RANK_ROUTES.has(route)) throw new Error("不支持的榜单");
+  const key = `rank:${route}:${page}`;
+  const cached = cacheGet(homeCache, key);
+  if (cached) return cached;
+
+  const suffix = page > 1 ? `?page=${page}` : "";
+  const html = await api.getText(`${SITE}/rank/${route}${suffix}`);
+
+  let payload = null;
+  try {
+    payload = parseRankPayload(html);
+  } catch {
+    // AI 剧榜在官网是客户端二次取数，SSR 只给空壳。用 AI 剧分类兜底，
+    // 保持「榜单」这个入口可用，并在返回里标明数据来源。
+  }
+  if (!payload) {
+    const fallback = await category("ai-drama", "", page);
+    const items = fallback.items.map((item, index) => ({
+      id: item.id,
+      rank: (page - 1) * 24 + index + 1,
+      title: item.title,
+      cover: item.cover,
+      heat: "",
+      rating: "",
+      fav: "",
+      like: "",
+      isNew: false,
+      tags: String(item.tags || "").split("/").filter(Boolean).slice(0, 4),
+      intro: item.description,
+      episodes: 0,
+    }));
+    const value = {
+      key: route,
+      route,
+      items,
+      page,
+      totalPages: fallback.totalPages,
+      updated: "",
+      fallback: "category",
+    };
+    cacheSet(homeCache, key, value);
+    return value;
+  }
+
+  const pagination = payload.pagination || {};
+  const items = payload.rankList.map((item) => ({
+    id: String(item.seriesId || item.series_id || item.id || ""),
+    rank: Number(item.rank || 0),
+    title: String(item.title || ""),
+    cover: api.cleanUrl(item.cover) || "",
+    heat: String(item.heatText || ""),
+    rating: String(item.scoreText || "").replace(/^评分/, ""),
+    fav: String(item.favoriteText || ""),
+    like: String(item.likeText || ""),
+    isNew: (item.statusTags || []).includes("新剧"),
+    tags: Array.isArray(item.tags) ? item.tags.slice(0, 4) : [],
+    intro: String(item.description || ""),
+    // 匿名请求下 episodeVids 只给公开预览的几集（通常 3），
+    // 真实总集数在 episodeCount 里。只有它缺失时才退回数组长度。
+    episodes: Number(item.episodeCount || 0) ||
+      (Array.isArray(item.episodeVids) ? item.episodeVids.length : 0),
+    openEpisodes: Number(item.openEpisodeCount || 0) ||
+      (Array.isArray(item.episodeVids) ? item.episodeVids.length : 0),
+  }));
+
+  // 榜单页头部文案（"10月22日已更新 · …"）没有单独字段，从 HTML 里捞。
+  const updatedMatch = /"updatedText"\s*:\s*"([^"]*)"/.exec(html);
+  const value = {
+    key: route,
+    route,
+    items: items.filter((item) => /^\d{1,30}$/.test(item.id) && item.title),
+    page,
+    totalPages: Number(pagination.totalPages || 1),
+    updated: updatedMatch ? updatedMatch[1].replace(/\\u002F/g, "/") : "",
+  };
+  cacheSet(homeCache, key, value);
+  return value;
+}
+
+export async function category(type, sub = "", page = 1) {
+  const label = CATEGORY_LABELS[type];
+  if (!label) throw new Error("不支持的分类");
+  const key = `category:${type}:${sub}:${page}`;
+  const cached = cacheGet(homeCache, key);
+  if (cached) return cached;
+
+  // 子分类走 /category/<type>/<slug>；官网只给真人剧铺了子分类路由。
+  const base = sub
+    ? `${SITE}/category/${type}/${encodeURIComponent(sub)}`
+    : `${SITE}/category/${type}`;
+  const data = await api.routerData(page > 1 ? `${base}?page=${page}` : base);
+  const pageData = data?.loaderData?.["category_$"];
+  const rows = pageData?.recommendList;
+  if (!Array.isArray(rows)) throw new Error("分类数据结构已变化");
+
+  const selector = pageData?.selectorList?.[0];
+  const pagination = pageData?.pagination || {};
+  const value = {
+    type,
+    label: String(pageData?.categoryRoute?.displayName || label),
+    seo: pageData?.seo || {},
+    tags: Array.isArray(selector?.items)
+      ? selector.items.map((item) => ({
+          id: String(item.selector_item_id || ""),
+          name: String(item.show_name || ""),
+        }))
+      : [],
+    items: validSeries(rows.map(toSeries)),
+    page,
+    total: Number(pagination.total || 0),
+    totalPages: Number(pagination.totalPages || 1),
+  };
+  cacheSet(homeCache, key, value);
+  return value;
 }
 
 // ---------------------------------------------------------------- 播放地址
@@ -421,115 +759,170 @@ async function publicPreview(id) {
 }
 
 /**
- * 账号解析：带 Cookie 请求 App 播放接口，取 spade 解密后的 CDN 地址与 CENC 密钥。
- * 平台 2026-10-15 起匿名请求返回空响应，所以这条路只在用户填了 Cookie 时尝试。
+ * App 播放接口的请求参数。照抓包（2026-10-22，红果桌面端 v1.2.10）还原：
+ *
+ * - host 必须是 api5-normal-lq（sinfonline 线路会回 110001）
+ * - biz_param.device_level 必须是 4（传 3 会回 110001）
+ * - query 要带齐 channel / dragon_device_type / compliance_status 等移动端字段
+ * - mixed_video_id_map 按 content_type 分组，短剧是 "1004"
+ *
+ * 返回的 data[vid].video_model 是 JSON 字符串，里面的 video_list 是
+ * { video_1: {definition:"360p", main_url:"<base64>", spade_a}, ... }。
+ */
+const PLAYER_HOST = "https://api5-normal-lq.fqnovel.com";
+
+const PLAYER_QUERY = {
+  ac: "wifi",
+  aid: "8662",
+  app_name: "novelread",
+  channel: "xiaomi_8662_64",
+  compliance_status: "0",
+  device_brand: "xiaomi",
+  device_type: "23127PN0CC",
+  dpi: "460",
+  dragon_device_type: "phone",
+  host_abi: "arm64-v8a",
+  is_android_pad_screen: "0",
+  language: "zh",
+  manifest_version_code: "73932",
+  need_personal_recommend: "1",
+  os: "android",
+  os_api: "34",
+  os_version: "14",
+  player_so_load: "1",
+  pv_player: "73932",
+  resolution: "1200*2670",
+  ssmix: "a",
+  update_version_code: "73932",
+  version_code: "73932",
+  version_name: "7.3.9.32",
+};
+
+const PLAYER_BIZ = {
+  detail_page_version: 0,
+  device_level: 4,
+  disable_digg_stat: false,
+  need_all_video_definition: true,
+  need_mp4_align: false,
+  use_os_player: false,
+  use_server_dns: false,
+  video_platform: 1024,
+};
+
+/**
+ * 匿名解析一集的播放地址。
+ *
+ * 这条路不需要登录：平台对移动端下发的 video_list 本身就带完整地址，
+ * 只有官网的 /video/public/ 路径才限制前几集。抓包确认桌面端在未登录
+ * 状态下就是这么播完整剧集的（本地 progress 表有播放记录、account 表为空）。
+ */
+async function appStream(id) {
+  const identity = await ensureIdentity();
+  const values = {
+    ...PLAYER_QUERY,
+    device_id: identity.deviceId,
+    iid: identity.installId,
+  };
+  const body = {
+    biz_param: PLAYER_BIZ,
+    mixed_video_id_map: { "1004": [String(id)] },
+  };
+  const signed = signedRequest(
+    `${PLAYER_HOST}/novel/player/multi_video_model/v1/`,
+    values,
+    body
+  );
+  if (accountCookie) signed.headers.Cookie = accountCookie;
+
+  const response = await fetch(signed.url, {
+    method: "POST",
+    headers: signed.headers,
+    body: signed.body,
+    signal: AbortSignal.timeout(30000),
+  });
+  if (!response.ok) throw new Error(`播放接口 HTTP ${response.status}`);
+  const data = await response.json();
+  const code = Number(data?.code ?? data?.Code ?? 0);
+  if (code !== 0) throw new Error(`播放接口暂不可用（${code}）`);
+
+  const entry = data?.data?.[String(id)];
+  if (!entry) throw new Error("播放接口没有返回这一集");
+  const model = parseJsonish(entry.video_model);
+  if (!model) throw new Error("播放接口没有返回播放模型");
+
+  const list = model.video_list;
+  const items = Array.isArray(list) ? list : Object.values(list || {});
+  const rows = items
+    .map((item) => {
+      const meta = item.video_meta || item;
+      const definition = String(item.definition || meta.definition || "");
+      const encoded = String(item.main_url || "");
+      let url = "";
+      try {
+        url = Buffer.from(encoded, "base64").toString("utf8");
+      } catch {
+        url = encoded;
+      }
+      return {
+        url,
+        quality: definition || "360p",
+        number: Number(definition.replace(/[^\d]/g, "")) || 0,
+        spadeA: item.spade_a || meta.spade_a || "",
+        keySeed: model.key_seed || "",
+      };
+    })
+    .filter((row) => /^https?:\/\//.test(row.url));
+
+  if (!rows.length) throw new Error("没有可用清晰度");
+
+  // 默认取不超过 720P 的最高档：再高对短剧没意义，还更容易被限速。
+  const usable = rows.filter((row) => row.number && row.number <= 720);
+  const selected = (usable.length ? usable : rows).sort(
+    (a, b) => b.number - a.number
+  )[0];
+
+  // spade_a 存在时地址是被 SPADE 包过的，要先解出真实地址。
+  let url = selected.url;
+  if (selected.spadeA && selected.keySeed) {
+    try {
+      url = api.decryptSpadeUrl(url, Buffer.from(selected.keySeed, "base64"));
+    } catch {
+      // 解不出来就用原地址；多数短剧并不加密。
+    }
+  }
+  if (!/^https?:\/\//.test(url)) throw new Error("播放地址无效");
+
+  const key = selected.spadeA ? api.deriveContentKey(selected.spadeA) : null;
+  return {
+    url,
+    key,
+    quality: selected.quality.toUpperCase().replace("P", "P"),
+    kind: accountCookie ? "account" : "public",
+  };
+}
+
+/** 把可能是字符串的 JSON 字段解析成对象。 */
+function parseJsonish(value) {
+  if (value && typeof value === "object") return value;
+  if (typeof value !== "string") return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 账号解析：带 Cookie 走同一个接口，多取一次 fallback_api 拿 CENC 密钥。
+ * 现在匿名也能拿到播放地址，这条路径只用于需要登录才能看的剧集。
  */
 async function accountStream(id) {
   if (!accountCookie) return null;
-  const identity = await ensureIdentity();
-  const host = "https://api5-normal-sinfonlineb.fqnovel.com";
-  const biz = {
-    detail_page_version: 0,
-    device_level: 3,
-    disable_digg_stat: false,
-    need_all_video_definition: true,
-    need_mp4_align: false,
-    use_os_player: false,
-    use_server_dns: false,
-    video_platform: 1024,
-  };
-  const candidates = [
-    ["/novel/player/video_model/v1/", { video_id: id, biz_param: biz }],
-    [
-      "/novel/player/multi_video_model/preload/v1/",
-      { biz_param: biz, mixed_video_id_map: { "1004": [id] } },
-    ],
-    [
-      "/novel/player/multi_video_model/default/v1/",
-      { biz_param: biz, mixed_video_id_map: { "1004": [id] } },
-    ],
-    [
-      "/novel/player/multi_video_model/detail/v1/",
-      { biz_param: biz, mixed_video_id_map: { "1004": [id] } },
-    ],
-    [
-      "/novel/player/multi_video_model/v1/",
-      { biz_param: biz, mixed_video_id_map: { "1004": [id] } },
-    ],
-  ];
-  let lastError = null;
-  for (const [path, body] of candidates) {
-    try {
-      const values = {
-        ...api.DEVICE,
-        device_id: identity.deviceId,
-        iid: identity.installId,
-      };
-      const signed = signedRequest(host + path, values, body);
-      signed.headers.Cookie = accountCookie;
-      let text = "";
-      // 网关偶发 200 + 空 body，原地重发几次再换路径。
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        const response = await fetch(signed.url, {
-          method: "POST",
-          headers: signed.headers,
-          body: signed.body,
-          signal: AbortSignal.timeout(30000),
-        });
-        text = await response.text();
-        if (text.trim()) break;
-        await new Promise((resolve) => setTimeout(resolve, 200 + attempt * 200));
-      }
-      if (!text.trim()) throw new Error("播放接口空响应");
-      const data = JSON.parse(text);
-      const code = Number(data.Code ?? data.code ?? 0);
-      if (code !== 0) throw new Error(`播放接口暂不可用（${code}）`);
-      const model = findVideoModel(data);
-      if (!model) throw new Error("播放接口没有返回播放模型");
-      const fallbackRaw = model.fallback_api;
-      const fallback =
-        typeof fallbackRaw === "object"
-          ? fallbackRaw.fallback_api || fallbackRaw[0]
-          : (() => {
-              try {
-                return JSON.parse(fallbackRaw).fallback_api;
-              } catch {
-                return fallbackRaw;
-              }
-            })();
-      if (!String(fallback).startsWith("https://"))
-        throw new Error("播放地址格式异常");
-      const infoResponse = await fetch(fallback, {
-        headers: {
-          "User-Agent": PLAYER_UA,
-          "Accept-Language": "zh-CN,zh;q=0.9",
-        },
-        signal: AbortSignal.timeout(30000),
-      });
-      const info = (await infoResponse.json())?.video_info?.data;
-      const rows = api
-        .qualityRows(info?.video_list)
-        .filter((row) => String(row.item?.codec_type || "").toLowerCase() !== "bytevc2");
-      if (!rows.length) throw new Error("没有可用清晰度");
-      const selected = rows.find((row) => api.qualityNumber(row.quality) <= 1080) || rows[0];
-      let url = api.cleanUrl(selected.item.main_url);
-      const seed = String(info?.key_seed || "");
-      if (seed && url) url = api.decryptSpadeUrl(url, Buffer.from(seed, "base64"));
-      if (!/^https?:\/\//.test(url)) throw new Error("播放地址无效");
-      const key = selected.item.spade_a
-        ? api.deriveContentKey(selected.item.spade_a)
-        : null;
-      return {
-        url,
-        key,
-        quality: api.qualityLabel(selected.quality || selected.key),
-        kind: "account",
-      };
-    } catch (error) {
-      lastError = error;
-    }
+  try {
+    return await appStream(id);
+  } catch {
+    return null;
   }
-  throw lastError || new Error("播放地址解析失败");
 }
 
 function findVideoModel(data) {
@@ -557,24 +950,67 @@ function findVideoModel(data) {
   return null;
 }
 
-/** 解析一集的播放来源：优先账号链路，失败/未配置时退回公开预览。 */
+/**
+ * 解析一集的播放来源。
+ *
+ * 顺序：App 播放接口（匿名可用，覆盖整部剧）→ 官网公开预览（兜底）。
+ * App 接口能拿到全部分集，所以正常情况不会走到第二步。
+ */
 export async function resolvePlayback(id) {
   const key = String(id);
   const cached = cacheGet(playbackCache, key);
   if (cached) return cached;
   let source = null;
-  if (accountCookie) {
-    try {
-      source = await accountStream(key);
-    } catch {
-      source = null;
-    }
+  try {
+    source = await appStream(key);
+  } catch {
+    source = null;
   }
   if (!source) source = await publicPreview(key);
   if (!source) throw new Error("这一集没有可播放的地址");
   cacheSet(playbackCache, key, source);
   return source;
 }
+
+/**
+ * 这一部剧能播到第几集。
+ *
+ * App 播放接口对整部剧都下发地址，所以匿名也能播完整剧集。这里只抽查第一集的
+ * 最后一个分集：能解析出地址就认为整部可播，避免对 86 集逐集打请求。
+ * 解析失败时退回官网公开预览的逐集探测（只有前几集）。
+ */
+const coverageCache = new Map();
+
+export async function previewCoverage(episodeIds) {
+  const list = Array.isArray(episodeIds) ? episodeIds : [];
+  if (!list.length) return 0;
+  const key = String(list[0]);
+  const cached = cacheGet(coverageCache, key);
+  if (cached !== null) return cached;
+
+  // 先看 App 接口能不能解析最后一集——能就整部可播。
+  try {
+    const last = String(list[list.length - 1]);
+    const probe = await appStream(last);
+    if (probe) {
+      cacheSet(coverageCache, key, list.length);
+      return list.length;
+    }
+  } catch {
+    // 落到公开预览探测。
+  }
+
+  let count = 0;
+  const limit = Math.min(list.length, 40);
+  for (let index = 0; index < limit; index += 1) {
+    const playable = await publicPreview(String(list[index]));
+    if (!playable) break;
+    count += 1;
+  }
+  cacheSet(coverageCache, key, count);
+  return count;
+}
+
 
 /** 供流代理使用：建 CENC 索引、按区间解密。 */
 export function createStreamReader(source) {

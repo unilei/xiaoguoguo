@@ -1,181 +1,120 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
-import { api, mergePage, Series } from "../lib/api";
-import { EmptyState, ErrorState, Loading, PosterGrid, SkeletonGrid } from "../components/Poster";
-import { clearSearches, loadSearches, pushSearch } from "../lib/storage";
+import { useEffect, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
+import { ApiError, fetchSearch, toCards } from '../lib/api';
+import type { SeriesCard } from '../lib/types';
+import { ASSETS } from '../lib/site';
+import { Breadcrumb } from '../components/Layout';
+import { PageError, PageLoading } from '../components/States';
 
 export function SearchPage() {
-  const [params, setParams] = useSearchParams();
-  const query = (params.get("q") || "").trim();
-  const [input, setInput] = useState(query);
-  const [items, setItems] = useState<Series[]>([]);
-  const [page, setPage] = useState(1);
-  const [hasMore, setHasMore] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [history, setHistory] = useState<string[]>(loadSearches());
-  const alive = useRef(true);
-  const loadingRef = useRef(false);
+  const [params] = useSearchParams();
+  const query = (params.get('q') || '').trim();
+
+  const [items, setItems] = useState<SeriesCard[]>([]);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    setInput(query);
-  }, [query]);
-
-  useEffect(() => {
-    alive.current = true;
     if (!query) {
       setItems([]);
-      setPage(1);
-      setHasMore(false);
-      setError("");
-      return () => {
-        alive.current = false;
-      };
+      setError('');
+      return;
     }
-    setItems([]);
-    setPage(1);
-    setHasMore(false);
-    setBusy(true);
-    setError("");
-    setHistory(pushSearch(query));
-    api
-      .search(query, 1)
-      .then((data) => {
-        if (!alive.current) return;
-        setItems(data.items);
-        setPage(1);
-        setHasMore(Boolean(data.hasMore));
+    let alive = true;
+    setLoading(true);
+    setError('');
+    fetchSearch(query, 1)
+      .then((payload) => {
+        // 服务端已按关键词检索（能命中简介与演员），不再本地二次过滤，
+        // 否则会把标题里没有关键词但语义相关的结果全删掉。
+        if (alive) setItems(toCards(payload.items));
       })
       .catch((problem) => {
-        if (alive.current)
-          setError(problem instanceof Error ? problem.message : "搜索失败");
+        if (alive) setError(problem instanceof ApiError ? problem.message : '搜索失败');
       })
       .finally(() => {
-        if (alive.current) setBusy(false);
+        if (alive) setLoading(false);
       });
     return () => {
-      alive.current = false;
+      alive = false;
     };
   }, [query]);
 
-  async function loadMore() {
-    if (loadingRef.current || !hasMore || !query) return;
-    loadingRef.current = true;
-    setBusy(true);
-    try {
-      const data = await api.search(query, page + 1);
-      if (!alive.current) return;
-      setItems((previous) => mergePage(previous, data.items));
-      setPage(page + 1);
-      setHasMore(Boolean(data.hasMore));
-    } catch (problem) {
-      if (alive.current)
-        setError(problem instanceof Error ? problem.message : "加载更多失败");
-    } finally {
-      loadingRef.current = false;
-      if (alive.current) setBusy(false);
-    }
-  }
-
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    const keyword = input.trim();
-    if (!keyword) return;
-    setParams({ q: keyword });
-  }
+  useEffect(() => {
+    document.title = query ? `${query} - 搜索_红果短剧官网` : '搜索_红果短剧官网';
+  }, [query]);
 
   return (
     <>
-      <div className="search-head">
-        <form className="search-form" onSubmit={submit} style={{ width: "min(520px, 100%)" }}>
-          <input
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") submit(event);
-            }}
-            placeholder="输入剧名、题材或关键词"
-            aria-label="搜索关键词"
-            autoFocus
-          />
-          <button className="search-submit" type="submit">
-            搜索
-          </button>
-        </form>
-        {history.length > 0 && (
-          <button
-            className="button small ghost"
-            onClick={() => {
-              clearSearches();
-              setHistory([]);
-            }}
-          >
-            清空历史
-          </button>
-        )}
+      <div className="page-cover">
+        <div className="page-cover-img" />
       </div>
 
-      {history.length > 0 && (
-        <div className="chips">
-          {history.map((keyword) => (
-            <Link
-              className="chip"
-              key={keyword}
-              to={`/search?q=${encodeURIComponent(keyword)}`}
-            >
-              {keyword}
-            </Link>
-          ))}
-        </div>
-      )}
+      <Breadcrumb items={[{ text: '首页', to: '/' }, { text: '搜索' }]} />
 
-      {!query && (
-        <EmptyState
-          title="搜一部想看的短剧"
-          hint="支持剧名与题材关键词。搜索结果来自红果内容源，登录信息不会被上传。"
-        />
-      )}
+      <div className="search-page">
+        <h1 className="search-heading">搜索 {query && <span>“{query}”</span>}</h1>
+        <p className="search-sub">
+          {!query
+            ? '输入关键词开始搜索'
+            : loading
+              ? '正在搜索…'
+              : `找到 ${items.length} 部相关短剧`}
+        </p>
 
-      {query && (
-        <>
-          <div className="search-head" style={{ marginTop: 8 }}>
-            <div className="search-query">
-              “<span>{query}</span>” 的结果
+        <div className="cat-page" style={{ marginTop: 8 }}>
+          {!query && (
+            <div className="search-empty">
+              <img className="search-empty-icon" src={ASSETS.emptyPlay} alt="" />
+              <p>试试搜索「逆袭」「穿越」「都市」</p>
             </div>
-            {!busy && items.length > 0 && (
-              <span className="section-sub">已显示 {items.length} 部</span>
-            )}
-          </div>
-
-          {busy && items.length === 0 && <SkeletonGrid />}
-          {!busy && error && items.length === 0 && (
-            <ErrorState message={error} onRetry={() => setParams({ q: query })} />
-          )}
-          {!busy && !error && items.length === 0 && (
-            <EmptyState title="没有找到相关短剧" hint="换个关键词试试，或检查网络后重试。" />
           )}
 
-          {items.length > 0 && (
-            <>
-              <PosterGrid items={items} />
-              {busy && <Loading label="加载更多" />}
-              {error && <div className="banner" style={{ marginTop: 18 }}>{error}</div>}
-              {!busy && hasMore && (
-                <div style={{ display: "flex", justifyContent: "center", marginTop: 28 }}>
-                  <button className="button" onClick={() => void loadMore()}>
-                    加载更多
-                  </button>
-                </div>
-              )}
-              {!busy && !hasMore && (
-                <div className="empty-hint" style={{ textAlign: "center", marginTop: 28 }}>
-                  已显示全部结果
-                </div>
-              )}
-            </>
+          {query && loading && <PageLoading label="正在搜索" />}
+
+          {query && !loading && error && (
+            <PageError message={error} onRetry={() => window.location.reload()} />
           )}
-        </>
-      )}
+
+          {query && !loading && !error && items.length === 0 && (
+            <div className="search-empty">
+              <img className="search-empty-icon" src={ASSETS.emptyPlay} alt="" />
+              <p>没有找到与「{query}」相关的短剧</p>
+            </div>
+          )}
+
+          {query && !loading && items.length > 0 && (
+            <div className="cat-grid">
+              {items.map((item) => (
+                <Link className="cat-card" key={item.id} to={`/detail/${item.id}`}>
+                  <div className="cat-card-cover-wrap">
+                    <img
+                      className="cat-card-cover"
+                      src={item.cover}
+                      alt={item.title}
+                      loading="lazy"
+                      decoding="async"
+                    />
+                    {item.episodeText && (
+                      <span className="cat-card-episode">{item.episodeText}</span>
+                    )}
+                  </div>
+                  <p className="cat-card-title">{item.title}</p>
+                  {item.tags.length > 0 && (
+                    <div className="cat-card-tags">
+                      {item.tags.slice(0, 3).map((tag) => (
+                        <span className="cat-card-tag" key={tag}>
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </Link>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
     </>
   );
 }

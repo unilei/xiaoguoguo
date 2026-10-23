@@ -8,6 +8,8 @@ import {
   home,
   search,
   detail,
+  category,
+  rank,
   resolvePlayback,
   createStreamReader,
   setAccountCookie,
@@ -16,6 +18,7 @@ import {
   ensureIdentity,
   signedRequest,
   setRequestIdentity,
+  previewCoverage,
 } from "./provider.mjs";
 import { configureAccountModule, verifyAccount } from "./account.mjs";
 import { importFromDevice, listDevices, sessionExpiry } from "./device-import.mjs";
@@ -46,6 +49,26 @@ export const HTML_HEADERS = {
   "Content-Type": "text/html; charset=utf-8",
   "Cache-Control": "no-store",
 };
+
+// 复刻站是独立静态站点（另一个端口），浏览器按同源策略会拦掉跨端口的 fetch。
+// 只放行本机来源，避免把内容接口变成对外公开的开放代理。
+const LOCAL_ORIGIN_RE = /^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$/;
+
+export function corsHeaders(origin) {
+  if (!origin || !LOCAL_ORIGIN_RE.test(origin)) return {};
+  return {
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Range, X-XGG-Device",
+    "Access-Control-Expose-Headers": "Content-Range, Content-Length, Accept-Ranges",
+    Vary: "Origin",
+  };
+}
+
+export function withCors(result, origin) {
+  if (!result) return result;
+  return { ...result, headers: { ...result.headers, ...corsHeaders(origin) } };
+}
 
 export function jsonResponse(status, value) {
   return {
@@ -261,17 +284,59 @@ export async function handleApi(request) {
     return jsonResponse(200, await search(keyword, page));
   }
 
+  if (pathname === "/api/category") {
+    const type = String(searchParams.get("type") || "real-drama");
+    const sub = String(searchParams.get("sub") || "").trim();
+    const page = Number(searchParams.get("page") || 1);
+    if (!Number.isInteger(page) || page < 1 || page > 100)
+      return jsonResponse(400, { error: "分页参数无效" });
+    if (sub.length > 40) return jsonResponse(400, { error: "子分类参数无效" });
+    return jsonResponse(200, await category(type, sub, page));
+  }
+
+  if (pathname === "/api/rank") {
+    const route = String(searchParams.get("key") || "hot-drama");
+    const page = Number(searchParams.get("page") || 1);
+    if (!Number.isInteger(page) || page < 1 || page > 100)
+      return jsonResponse(400, { error: "分页参数无效" });
+    return jsonResponse(200, await rank(route, page));
+  }
+
   const detailMatch = /^\/api\/series\/(\d{1,30})$/.exec(pathname);
-  if (detailMatch) return jsonResponse(200, await detail(detailMatch[1]));
+  if (detailMatch) {
+    const data = await detail(detailMatch[1]);
+    // 告诉前端前几集能匿名播，选集页据此标记不可播的集数。
+    // 探测失败不影响详情本身，返回 null 让前端退回「全部可点」。
+    let previewEpisodes = null;
+    try {
+      previewEpisodes = await previewCoverage(data.episodes.map((episode) => episode.id));
+    } catch {
+      previewEpisodes = null;
+    }
+    return jsonResponse(200, { ...data, previewEpisodes });
+  }
 
   const playMatch = /^\/api\/episodes\/(\d{1,30})\/play$/.exec(pathname);
   if (playMatch) {
-    const source = await resolvePlayback(playMatch[1]);
-    return jsonResponse(200, {
-      path: `/api/episodes/${playMatch[1]}/stream`,
-      quality: source.quality,
-      kind: source.kind,
-    });
+    try {
+      const source = await resolvePlayback(playMatch[1]);
+      return jsonResponse(200, {
+        path: `/api/episodes/${playMatch[1]}/stream`,
+        quality: source.quality,
+        kind: source.kind,
+      });
+    } catch (error) {
+      // 匿名且这一集超出公开预览范围：这是预期状态，不是服务故障。
+      // 用 402 + 明确的 reason，前端据此引导登录，而不是弹「无法播放」。
+      if (!hasAccountCookie()) {
+        return jsonResponse(402, {
+          error: "这一集需要登录后才能播放",
+          reason: "login_required",
+          account: "anonymous",
+        });
+      }
+      throw error;
+    }
   }
 
   const streamMatch = /^\/api\/episodes\/(\d{1,30})\/stream$/.exec(pathname);

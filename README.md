@@ -39,16 +39,41 @@ HOST=0.0.0.0 PORT=8788 npm start
 
 ## 播放能力说明
 
-平台从 2026-10-15 起不再向**匿名请求**下发完整播放地址。因此：
+**匿名就能播完整剧集。** 服务端走 App 的移动端播放接口，不需要账号：
 
 | 场景 | 是否需要账号 | 覆盖范围 |
 | --- | --- | --- |
 | 浏览 / 搜索 / 详情 | 不需要 | 全部剧集 |
-| 播放（公开预览） | 不需要 | 每部剧前几集，360P |
-| 播放（完整剧集） | 需要自己的 Cookie | 该账号可见的清晰度 |
+| 播放（App 接口） | 不需要 | **整部剧**，360P–720P |
+| 播放（官网公开预览） | 不需要 | 每部剧前 3 集，360P（仅作兜底） |
 
-在「设置 → 账号 Cookie」粘贴你在红果 App / 网页端的整段 Cookie 即可解锁完整播放。
-Cookie 只保存在服务进程内存里，不写入仓库、日志或前端存储，服务重启后需重新填写。
+早期版本只用了官网的 `/video/public/<vid>/360p.mp4`，那条路确实只开放前几集。
+现在改走 `/novel/player/multi_video_model/v1/`，返回的 `video_model.video_list`
+带全部分集的 CDN 地址，匿名可用。参数照桌面端抓包还原，几个必须对齐的点：
+
+- host 用 `api5-normal-lq.fqnovel.com`（`sinfonline` 线路回 `110001`）
+- `biz_param.device_level` 必须是 **4**（传 3 回 `110001`）
+- query 要带齐 `channel=xiaomi_8662_64`、`dragon_device_type=phone`、
+  `compliance_status=0`、`version_code=73932` 等移动端字段
+- `mixed_video_id_map` 按 content_type 分组，短剧是 `"1004"`
+- 返回的 `main_url` 是 **base64**，要先解码；`spade_a` + `key_seed` 同时存在时
+  还要解一层 SPADE
+
+App 接口拿不到时才退回官网公开预览。账号 Cookie 仍然有用：某些剧集可能需要
+登录态才下发地址，这时在「设置 → 账号 Cookie」填入自己的 Cookie 即可。
+
+Cookie 不写入仓库、日志或前端存储。**本地 / 自托管部署时**它会以 0600 权限保存在
+`server/.data/account-cookie`，重启后自动恢复，不用每次重填；`.data/` 已在 `.gitignore` 里。
+想换位置就设 `ACCOUNT_COOKIE_FILE`。
+
+匿名设备身份也保存在 `server/.data/device.json`（同样 0600），可用
+`DEVICE_IDENTITY_FILE` 改位置。这一项不能省：平台把发码凭证绑在 `device_id` 上，
+每次重启换新设备会让用户手里的验证码凭证立刻失效。
+
+**Serverless（Vercel 等）没有共享磁盘**，请用环境变量 `ACCOUNT_COOKIE` 注入登录态；
+匿名设备身份则依赖前端回传的 `x-xgg-device` 请求头在发码与登录之间保持一致。
+进程内保存的登录态会在冷启动后丢失。设置页顶部会显示当前是「已登录」还是「匿名模式」。
+
 请只使用你自己的账号，不要分享或提交到代码仓库。
 
 ### 怎么登录
@@ -58,18 +83,51 @@ Cookie 只保存在服务进程内存里，不写入仓库、日志或前端存�
 #### 方式一：手机号 + 验证码（设置页直接登录）
 
 红果账号的手机号收验证码即可登录，未注册的手机号会自动创建账号。
-参数与流程照 HGTV v1.1.5.1 APK 的实际调用还原：
+参数与流程照 HGTV v1.1.5.1 APK 与红果桌面端（Wails/Go）的实际调用还原：
 
 | 步骤 | 接口 | 关键参数 |
 | --- | --- | --- |
-| 发验证码 | `POST /passport/mobile/send_code/v1/` | `mobile="+86…"`、`account_sdk_source=app`、`passport_support_flow="captcha,verify"`、`mix_mode=1`、`auto_read=0`、`unbind_exist=34`、`type=24` |
-| 换登录态 | `POST /passport/mobile/sms_login/` | `mobile`、`code`、`sms_code_key`（上一步返回）、`passport_mfa_retry_tag=1` |
+| 发验证码 | `POST /passport/mobile/send_code/v1/` | `mobile="+86…"`、`account_sdk_source=app`、`passport_support_flow="captcha,verify"`、`mix_mode=1`、`auto_read=0`、`type=101` |
+| 换登录态（主） | `POST /passport/mobile/sms_login/` | `mobile`、`code`、`sms_code_key`（上一步返回）、`passport_mfa_retry_tag=1` |
+| 换登录态（备） | `POST /passport/upsms/verify/` | `mobile`、`code`、`verify_way=sms`、`verify_scene=login`、**`verify_ticket`** |
 
-两个接口都在 `api5-normal-*.fqnovel.com` 线路下（`passport.snssdk.com` 对这些路径回 404），
-并带上匿名设备注册得到的 `device_id` / `iid`。
+这些接口都在 `api5-normal-*.fqnovel.com` 线路下（`passport.snssdk.com` 对这些路径回 404），
+并带上匿名设备注册得到的 `device_id` / `iid`。发码响应里下发的 `passport_csrf_token`
+会按手机号记住，登录时一并带上，让两次请求落在同一个会话上下文里。
 
-> **实测注意**：同一 IP 短时间内多次调用会返回 `error_code=7 访问太频繁`，
-> 这是平台的频控，等一段时间或换网络即可。验证码有效期约 10 分钟。
+**登录走双路径**，这是照 App 的 `flow.(*Login)` 实现的：`SMSLogin` 没能直接换到
+session 时（返回 1066），再用同一条凭证换字段名走 `UpsmsVerify`。两个接口的凭证
+字段名不同，这是最容易踩的坑：
+
+| 接口 | 凭证字段 | 传错字段的后果 |
+| --- | --- | --- |
+| `sms_login` | `sms_code_key` | 传 `mobile_ticket` → `1203`「错误次数过多或验证码过期」，看起来像验证码错了 |
+| `upsms/verify` | `verify_ticket` | 传 `sms_code_key` → `3`「缺少参数」 |
+
+两个接口的错误码含义也不一样，可以据此判断问题出在哪：
+
+- `1045`「认证失败」= 凭证被接受，**验证码不对**
+- `1066`「长时间未操作，验证已过期」= 凭证本身失效，要重新发码
+- `1203` = 凭证字段名不对或没带
+- `3`「缺少参数」= 请求参数结构不对
+
+> **1066「长时间未操作，验证已过期」的真实原因**：
+>
+> 1. **`sms_login` 只走了第一步**。App 的登录是两步：`SMSLogin` 拿不到 session 时
+>    还要用同一条凭证走 `UpsmsVerify`。只做第一步就只会看到 1066，
+>    实际凭证是好的——代码现在会自动走第二步，看到 `1045` 就说明凭证没问题。
+> 2. **拿的是旧凭证**。平台每次重新发码都会作废旧凭证，即使号码没变。
+>    所以「短信刚收到」不等于「手里的 ticket 还是新的」。
+> 3. **设备身份变了**。凭证按 `device_id` 绑定；服务重启后如果重新注册设备，
+>    旧凭证立刻失效。本地部署已把设备身份存进 `server/.data/device.json`，重启复用同一台。
+> 4. **号码本身被平台拒绝**。此时发码返回 `1003`，`description` 是
+>    「手机号错误，请重新填写」——`1003` 是号码问题，不是频控。
+>
+> 只有 1066 / 1203 时接口才带 `expired: true`，前端据此清掉本地凭证并清空验证码框。
+> `1045` 表示验证码填错了，凭证仍可继续用，不清空。
+
+> **实测注意**：同一 IP / 同一设备短时间内多次调用会返回 `error_code=7 访问太频繁`
+> 或 `1206`（发码冷却）。冷却期间平台仍下发新 ticket，收到过短信就可以直接填验证码登录。
 
 #### 方式二：从模拟器 / 手机导入
 
@@ -135,8 +193,8 @@ worker/   Cloudflare Workers 入口：同一套接口，vendor 静态转换后�
 | `GET /api/health` | 服务状态与账号模式 |
 | `GET /api/home?page=1` | `{ items, page, totalPages }` |
 | `GET /api/search?q=关键词&page=1` | `{ items, page, hasMore }` |
-| `GET /api/series/:id` | 剧集详情 + `episodes` |
-| `GET /api/episodes/:id/play` | `{ path, quality, kind }` |
+| `GET /api/series/:id` | 剧集详情 + `episodes` + `previewEpisodes`（匿名可播集数，null 表示未探测） |
+| `GET /api/episodes/:id/play` | `{ path, quality, kind }`；匿名且超出预览范围时返回 402 `{ reason: "login_required" }` |
 | `GET /api/episodes/:id/stream` | MP4 流，支持 Range |
 | `POST /api/account` | `{ cookie }` 校验并设置/清除账号 Cookie |
 | `POST /api/account/sms/send` | `{ mobile }` 发送登录验证码 |

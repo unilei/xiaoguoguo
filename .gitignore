@@ -7,3 +7,4 @@ dist/
 outputs/
 web/tsconfig.tsbuildinfo
 web/dist
+.data/

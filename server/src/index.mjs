@@ -4,10 +4,22 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { handleApi } from "./api.mjs";
+import { handleApi, corsHeaders, withCors } from "./api.mjs";
+import { restoreAccountCookie } from "./provider.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const webRoot = path.resolve(here, "../../web/dist");
+
+// 账号 Cookie 与设备身份默认落在服务目录下的 .data/，重启后自动恢复。
+// 设备身份必须稳定：平台把发码凭证绑在 device_id 上，换了设备会让凭证立刻失效。
+// 部署在无状态平台时改用环境变量 ACCOUNT_COOKIE 注入登录态。
+if (!process.env.ACCOUNT_COOKIE_FILE) {
+  process.env.ACCOUNT_COOKIE_FILE = path.resolve(here, "../.data/account-cookie");
+}
+if (!process.env.DEVICE_IDENTITY_FILE) {
+  process.env.DEVICE_IDENTITY_FILE = path.resolve(here, "../.data/device.json");
+}
+const restored = restoreAccountCookie();
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -84,9 +96,16 @@ const host = process.env.HOST || "127.0.0.1";
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
   const method = req.method || "GET";
-  if (!["GET", "HEAD", "POST"].includes(method)) {
+  const origin = req.headers.origin;
+  if (!["GET", "HEAD", "POST", "OPTIONS"].includes(method)) {
     res.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
     return res.end(JSON.stringify({ error: "Method not allowed" }));
+  }
+
+  // 预检：复刻站带 Range 拉流 / 带 JSON 体登录时会先发 OPTIONS。
+  if (method === "OPTIONS") {
+    res.writeHead(204, corsHeaders(origin));
+    return res.end();
   }
 
   try {
@@ -105,7 +124,8 @@ const server = http.createServer(async (req, res) => {
     });
 
     if (result) {
-      res.writeHead(result.status, result.headers);
+      const withOrigin = withCors(result, origin);
+      res.writeHead(withOrigin.status, withOrigin.headers);
       if (result.stream) {
         if (method === "HEAD") return res.end();
         for await (const chunk of result.stream) {
@@ -147,6 +167,11 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(port, host, () => {
   console.log(`小果果内容服务：http://${host}:${port}`);
+  console.log(
+    restored
+      ? "已恢复上次保存的账号登录态，完整剧集可播。"
+      : "当前是匿名模式：可播放完整剧集，登录只用于同步收藏/历史。"
+  );
   if (host === "0.0.0.0") console.log("局域网访问已开启，请只在可信网络使用。");
   else console.log("当前仅监听本机。要用手机扫码导入 Cookie，请用 HOST=0.0.0.0 启动。");
 });

@@ -1,246 +1,340 @@
-export interface Series {
-  id: string;
-  title: string;
-  cover: string;
-  description: string;
-  badge: string;
-  tags: string;
-}
+/**
+ * 内容服务客户端。
+ *
+ * 所有内容数据都走 /api/*（Vite dev 代理到 127.0.0.1:8788，
+ * 生产环境由同一个 Node 服务提供），不读任何本地数据文件。
+ *
+ * 服务端协议实现见 server/src/provider.mjs —— 签名、设备注册、
+ * 播放地址解析都在那边完成，前端只消费 JSON。
+ */
 
-export interface Episode {
-  id: string;
-  number: number;
-  title: string;
-}
+import type {
+  ApiListPage,
+  ApiPlayback,
+  ApiRankPage,
+  CategoryRecord,
+  DetailRecord,
+  HealthPayload,
+  RankRecord,
+  SeriesCard,
+} from './types';
 
-export interface Detail extends Series {
-  episodes: Episode[];
-}
+const TIMEOUT = 10000;
 
-export interface Playback {
-  path: string;
-  quality: string;
-  kind: "public" | "account";
-}
-
-export interface Progress {
-  series: Series;
-  episodeId: string;
-  episodeNumber: number;
-  position: number;
-  duration: number;
-  completed: boolean;
-  updatedAt: number;
-}
-
-export interface Library {
-  favorites: Series[];
-  progress: Record<string, Progress>;
-}
-
-export interface ListPage {
-  items: Series[];
-  page: number;
-  hasMore?: boolean;
-  totalPages?: number;
-}
-
-export interface ApiError {
-  error: string;
-}
-
-// 设备身份：发验证码时服务端下发，登录时原样带回。
-// Serverless 多实例之间不共享内存，靠这个头保证"同一台设备"。
-const DEVICE_KEY = "xiaoguoguo.device.v1";
-
-export function readDeviceId(): string {
-  try {
-    return localStorage.getItem(DEVICE_KEY) || "";
-  } catch {
-    return "";
+export class ApiError extends Error {
+  status?: number;
+  reason?: string;
+  constructor(message: string, status?: number, reason?: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.reason = reason;
   }
 }
 
-function rememberDevice(response: Response): void {
-  const value = response.headers.get("x-xgg-device");
-  if (!value) return;
-  try {
-    localStorage.setItem(DEVICE_KEY, value);
-  } catch {
-    // 隐私模式下写不进去，退化成每次新设备（登录可能失败，但不影响浏览）。
-  }
-}
-
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const device = readDeviceId();
-  const response = await fetch(path, {
-    ...init,
-    headers: {
-      ...(init?.body ? { "Content-Type": "application/json" } : {}),
-      ...(device ? { "x-xgg-device": device } : {}),
-      ...(init?.headers || {}),
-    },
+async function get<T>(path: string, params?: Record<string, string | number | undefined>): Promise<T> {
+  const qs = new URLSearchParams();
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return;
+    qs.set(key, String(value));
   });
-  rememberDevice(response);
-  const text = await response.text();
-  let data: unknown = null;
+  const url = `/api${path}${qs.toString() ? `?${qs}` : ''}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT);
   try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    throw new Error("服务返回了无法解析的内容");
+    const response = await fetch(url, { signal: controller.signal, cache: 'no-store' });
+    const text = await response.text();
+    let payload: unknown = null;
+    try {
+      payload = text ? JSON.parse(text) : null;
+    } catch {
+      throw new ApiError('服务返回了无法解析的内容', response.status);
+    }
+    if (!response.ok) {
+      const body = payload as { error?: string; message?: string; reason?: string } | null;
+      throw new ApiError(
+        body?.error || body?.message || `请求失败（${response.status}）`,
+        response.status,
+        body?.reason
+      );
+    }
+    return payload as T;
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new ApiError('内容服务响应超时');
+    }
+    throw new ApiError(error instanceof Error ? error.message : '网络请求失败');
+  } finally {
+    clearTimeout(timer);
   }
-  if (!response.ok) {
-    // 后端两种失败形态：{ error } 和 { ok:false, message }，都要把真实原因带出来。
-    // 有些错误还带着可继续使用的字段（如短信冷却期的 mobileTicket），挂到 error 上。
-    const payload = data as
-      | {
-          error?: string;
-          message?: string;
-          code?: number;
-          mobileTicket?: string;
-          ticketTail?: string;
-          phoneTail?: string;
-        }
-      | null;
-    const failure = new Error(
-      payload?.error || payload?.message || `请求失败（${response.status}）`
-    ) as Error & {
-      code?: number;
-      mobileTicket?: string;
-      ticketTail?: string;
-      phoneTail?: string;
+}
+
+let healthPromise: Promise<HealthPayload> | null = null;
+
+/** 探测内容服务；失败清缓存，下次重试。 */
+export function probeService(): Promise<HealthPayload> {
+  if (healthPromise) return healthPromise;
+  healthPromise = get<HealthPayload>('/health')
+    .then((data) => {
+      if (!data || data.service !== 'xiaoguoguo') throw new ApiError('不是内容服务');
+      return data;
+    })
+    .catch((error) => {
+      healthPromise = null;
+      throw error;
+    });
+  return healthPromise;
+}
+
+/**
+ * 实时接口的 tags 字段可能是数组、斜杠分隔串，也可能是整段简介
+ * （搜索接口就是这样）。按长度过滤掉明显是正文的值。
+ */
+export function splitTags(value: string | string[] | undefined): string[] {
+  if (Array.isArray(value)) return value.filter(Boolean);
+  const text = String(value || '').trim();
+  if (!text || text.length > 30) return [];
+  return text
+    .split('/')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function episodeCountOf(item: { episodes?: number; badge?: string }): number {
+  const n = Number(item.episodes || 0);
+  if (n) return n;
+  const match = /(\d+)/.exec(String(item.badge || ''));
+  return match ? Number(match[1]) : 0;
+}
+
+export function toCard(item: {
+  id?: string;
+  title?: string;
+  cover?: string;
+  description?: string;
+  badge?: string;
+  tags?: string | string[];
+  episodes?: number;
+}): SeriesCard {
+  const count = episodeCountOf(item);
+  return {
+    id: String(item.id || ''),
+    title: String(item.title || ''),
+    cover: String(item.cover || ''),
+    intro: String(item.description || ''),
+    tags: splitTags(item.tags).slice(0, 3),
+    episodes: count,
+    episodeText: String(item.badge || (count ? `全${count}集` : '')),
+  };
+}
+
+export function toCards(items: ApiListPage['items'] | undefined): SeriesCard[] {
+  return (items || []).map(toCard).filter((item) => item.id && item.title);
+}
+
+/**
+ * 大数字转「万 / 亿」：接口给的是原始数值（4373000），
+ * 原站展示成「437.3万」。详情页的点赞/收藏要用这个。
+ */
+export function formatCount(value: string | number): string {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return String(value || '');
+  if (n >= 100000000) return `${(n / 100000000).toFixed(1).replace(/\.0$/, '')}亿`;
+  if (n >= 10000) return `${(n / 10000).toFixed(1).replace(/\.0$/, '')}万`;
+  return String(n);
+}
+
+export function toDetailRecord(data: Record<string, unknown>): DetailRecord {
+  const social = (data.social || {}) as Record<string, unknown>;
+  const episodes = Array.isArray(data.episodes) ? (data.episodes as { id: string }[]) : [];
+  const count = Number(data.episodeCount || episodes.length || 0);
+  const celebs = Array.isArray(data.celebrities)
+    ? (data.celebrities as { name?: string; avatar?: string; role?: string }[]).map((c) => ({
+        name: String(c.name || ''),
+        avatar: String(c.avatar || ''),
+        role: String(c.role || ''),
+      }))
+    : [];
+  const castLine = celebs
+    .filter((c) => c.name)
+    .slice(0, 6)
+    .map((c) => (c.role ? `${c.name} ${c.role}` : c.name))
+    .join('、');
+
+  const reviews = Array.isArray(social.reviews)
+    ? (social.reviews as Record<string, unknown>[]).map((r) => ({
+        content: String(r.content || ''),
+        user: String(r.user || ''),
+        avatar: String(r.avatar || ''),
+        stars: Number(r.stars || 0),
+        digg: Number(r.digg || 0),
+      }))
+    : [];
+
+  return {
+    id: String(data.id || ''),
+    title: String(data.title || ''),
+    cover: String(data.cover || ''),
+    intro: String(data.description || ''),
+    tags: splitTags(data.tags as string | string[] | undefined),
+    episodes: count,
+    episodeText: String(data.badge || (count ? `全${count}集` : '')),
+    accessible: Number(data.previewEpisodes || 0) || count,
+    celebrities: celebs,
+    vidList: episodes.map((ep) => String(ep.id)),
+    rating: social.rating ? String(social.rating) : '',
+    likeCount: String(social.likeCount || ''),
+    favCount: String(social.favoriteCount || ''),
+    ratingCount: String(social.ratingCount || ''),
+    reviewTotal: Number(social.reviewTotal || 0),
+    reviews,
+    related: [],
+    heroBg: String(data.cover || ''),
+    hotText: String(social.hotText || ''),
+    rankLabel: String(social.rankLabel || ''),
+    castLine,
+  };
+}
+
+export function toCategoryRecord(payload: ApiListPage, path: string): CategoryRecord {
+  const videos = toCards(payload.items);
+  return {
+    path,
+    contentType: payload.type || '',
+    label: String(payload.label || ''),
+    seo: payload.seo || {},
+    tags: payload.tags || [],
+    videos,
+    pagination: {
+      total: Number(payload.total || 0),
+      pageNum: Number(payload.page || 1),
+      pageSize: videos.length || 24,
+      totalPages: Number(payload.totalPages || 1),
+    },
+  };
+}
+
+export function toRankRecord(payload: ApiRankPage, path: string): RankRecord {
+  const items = (payload.items || []).map((item) => {
+    const playHref = `/player/${item.id}`;
+    const count = Number(item.episodes || 0);
+    const epLinks = Array.from({ length: Math.min(count, 500) }, (_, index) => ({
+      text: String(index + 1),
+      href: `${playHref}?ep=${index + 1}`,
+    }));
+    return {
+      rank: String(item.rank || ''),
+      title: String(item.title || ''),
+      cover: String(item.cover || ''),
+      link: `/detail/${item.id}`,
+      playHref,
+      heat: String(item.heat || ''),
+      rating: String(item.rating || ''),
+      fav: String(item.fav || ''),
+      like: String(item.like || ''),
+      isNew: Boolean(item.isNew),
+      tags: (item.tags || []).slice(0, 4),
+      intro: String(item.intro || ''),
+      episodes: count,
+      epLinks,
     };
-    if (payload?.code !== undefined) failure.code = payload.code;
-    if (payload?.mobileTicket) failure.mobileTicket = payload.mobileTicket;
-    if (payload?.ticketTail) failure.ticketTail = payload.ticketTail;
-    if (payload?.phoneTail) failure.phoneTail = payload.phoneTail;
-    throw failure;
-  }
-  return data as T;
+  });
+  return {
+    path,
+    label: String(payload.label || ''),
+    updated: String(payload.updated || ''),
+    items,
+    pagination: {
+      pageNum: Number(payload.page || 1),
+      totalPages: Number(payload.totalPages || 1),
+    },
+  };
 }
 
-export const api = {
-  health: () =>
-    request<{
-      service: string;
-      account: "configured" | "anonymous";
-      runtime?: "cloudflare-worker" | string;
-      kv?: boolean;
-    }>("/api/health"),
-  home: (page = 1) => request<ListPage>(`/api/home?page=${page}`),
-  search: (query: string, page = 1) =>
-    request<ListPage>(`/api/search?q=${encodeURIComponent(query)}&page=${page}`),
-  detail: (id: string) => request<Detail>(`/api/series/${encodeURIComponent(id)}`),
-  play: (episodeId: string) =>
-    request<Playback>(`/api/episodes/${encodeURIComponent(episodeId)}/play`),
-  saveAccount: (cookie: string) =>
-    request<{ ok: boolean; account: boolean; profile?: AccountProfile }>("/api/account", {
-      method: "POST",
-      body: JSON.stringify({ cookie }),
-    }),
-  createQr: () =>
-    request<{
-      token: string;
-      url: string;
-      expiresAt: number;
-      sameDevice: boolean;
-      qr: string;
-    }>("/api/account/qr", { method: "POST" }),
-  qrStatus: (token: string) =>
-    request<{ valid: boolean; expiresAt: number }>(`/api/account/qr/${token}`),
-  devices: () =>
-    request<{ ok: boolean; devices: string[]; error?: string }>("/api/account/devices"),
-  sendSms: (mobile: string) =>
-    request<{
-      ok: boolean;
-      mobile: string;
-      smsCodeKey: string;
-      retryAfter: number;
-      message: string;
-      /** 冷却期（1206）时平台仍会下发 ticket，可直接用来登录。 */
-      mobileTicket?: string;
-    }>("/api/account/sms/send", {
-      method: "POST",
-      body: JSON.stringify({ mobile }),
-    }),
-  loginSms: (mobile: string, code: string, smsCodeKey: string) =>
-    request<{
-      ok: boolean;
-      profile: AccountProfile;
-      expiry: SessionExpiry;
-    }>("/api/account/sms/login", {
-      method: "POST",
-      body: JSON.stringify({ mobile, code, smsCodeKey }),
-    }),
-  importFromDevice: (serial: string) =>
-    request<{
-      ok: boolean;
-      serial: string;
-      fields: number;
-      expiry: SessionExpiry;
-      profile: AccountProfile;
-    }>("/api/account/device", {
-      method: "POST",
-      body: JSON.stringify({ serial }),
-    }),
-};
+// ---------------------------------------------------------------- 首页
 
-export interface SessionExpiry {
-  known: boolean;
-  issued?: number;
-  expires?: number;
-  expiresText?: string;
-  remainingDays?: number;
-  expired?: boolean;
+export interface HomeData {
+  sections: { key: string; name: string; videos: SeriesCard[] }[];
+  banners: { id: string; name: string; link: string; bg: string; cover: string; intro: string; tags: string[] }[];
+  mobileBanners: { id: string; name: string; link: string; bg: string; intro: string; tags: string[] }[];
 }
 
-export interface AccountProfile {
-  nickname: string;
-  avatar: string;
-  displayId: string;
+/** 首页四个板块：热播 + 真人 + 漫剧 + AI。 */
+export async function fetchHome(): Promise<HomeData> {
+  const [home, human, comic, ai] = await Promise.all([
+    get<ApiListPage>('/home', { page: 1 }),
+    get<ApiListPage>('/category', { type: 'real-drama', page: 1 }),
+    get<ApiListPage>('/category', { type: 'comic-drama', page: 1 }),
+    get<ApiListPage>('/category', { type: 'ai-drama', page: 1 }),
+  ]);
+
+  const top = toCards(home.items);
+  const sections = [
+    { key: 'all', name: '热播短剧', videos: top.slice(0, 9) },
+    { key: 'human', name: '热播真人剧', videos: toCards(human.items).slice(0, 9) },
+    { key: 'comic', name: '热播漫剧', videos: toCards(comic.items).slice(0, 9) },
+    { key: 'ai', name: '热播AI剧', videos: toCards(ai.items).slice(0, 9) },
+  ].filter((section) => section.videos.length);
+
+  if (!sections.length) throw new ApiError('首页没有内容');
+
+  const toBanner = (item: SeriesCard) => ({
+    id: item.id,
+    name: item.title,
+    link: `/detail/${item.id}`,
+    bg: item.cover,
+    cover: item.cover,
+    intro: item.intro,
+    tags: item.tags,
+  });
+
+  return {
+    sections,
+    banners: top.slice(0, 4).map(toBanner),
+    mobileBanners: top.slice(0, 3).map(toBanner),
+  };
+}
+
+// ---------------------------------------------------------------- 列表
+
+export async function fetchCategory(type: string, sub: string, page: number) {
+  return get<ApiListPage>('/category', { type, sub, page });
+}
+
+export async function fetchRank(key: string, page: number) {
+  return get<ApiRankPage>('/rank', { key, page });
+}
+
+export async function fetchSearch(query: string, page: number) {
+  return get<ApiListPage>('/search', { q: query, page });
+}
+
+export async function fetchHomePage(page: number) {
+  return get<ApiListPage>('/home', { page });
+}
+
+// ---------------------------------------------------------------- 详情
+
+export async function fetchDetail(id: string) {
+  return get<Record<string, unknown>>(`/series/${id}`);
+}
+
+/** 详情页相关推荐：服务端详情不带 related，用首页条目补齐。 */
+export async function fetchRelated(excludeId: string) {
+  const home = await get<ApiListPage>('/home', { page: 1 });
+  return toCards(home.items)
+    .filter((item) => item.id !== excludeId)
+    .slice(0, 6)
+    .map((item) => ({ title: item.title, cover: item.cover, link: `/detail/${item.id}` }));
+}
+
+// ---------------------------------------------------------------- 播放
+
+export async function fetchPlayback(episodeId: string) {
+  return get<ApiPlayback>(`/episodes/${episodeId}/play`);
 }
 
 export function streamUrl(episodeId: string): string {
-  return `/api/episodes/${encodeURIComponent(episodeId)}/stream`;
-}
-
-export function resumeTarget(
-  detail: Detail,
-  progress?: Progress
-): { index: number; position: number } {
-  if (!progress) return { index: 0, position: 0 };
-  const index = detail.episodes.findIndex((episode) => episode.id === progress.episodeId);
-  if (index < 0) return { index: 0, position: 0 };
-  if (progress.completed)
-    return {
-      index: Math.min(index + 1, detail.episodes.length - 1),
-      position: 0,
-    };
-  return { index, position: Math.max(0, progress.position) };
-}
-
-export function mergePage(existing: Series[], incoming: Series[]): Series[] {
-  return Array.from(
-    new Map([...existing, ...incoming].map((item) => [item.id, item])).values()
-  );
-}
-
-export function formatTime(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
-  const total = Math.floor(seconds);
-  const minutes = Math.floor(total / 60);
-  const rest = total % 60;
-  return `${minutes}:${String(rest).padStart(2, "0")}`;
-}
-
-export function formatRelative(timestamp: number): string {
-  const diff = Date.now() - timestamp;
-  const minute = 60 * 1000;
-  const hour = 60 * minute;
-  const day = 24 * hour;
-  if (diff < minute) return "刚刚";
-  if (diff < hour) return `${Math.floor(diff / minute)} 分钟前`;
-  if (diff < day) return `${Math.floor(diff / hour)} 小时前`;
-  if (diff < 7 * day) return `${Math.floor(diff / day)} 天前`;
-  return new Date(timestamp).toLocaleDateString("zh-CN");
+  return `/api/episodes/${episodeId}/stream`;
 }
