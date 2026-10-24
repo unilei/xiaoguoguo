@@ -19,7 +19,9 @@ import type {
   SeriesCard,
 } from './types';
 
-const TIMEOUT = 10000;
+// Serverless 冷启动要重新注册设备、拉源站 SSR，首次请求实测 6–7 秒；
+// 10 秒的预算刚好卡在临界点，抖动一下就会误报超时。
+const TIMEOUT = 30000;
 
 export class ApiError extends Error {
   status?: number;
@@ -262,11 +264,13 @@ export interface HomeData {
 
 /** 首页四个板块：热播 + 真人 + 漫剧 + AI。 */
 export async function fetchHome(): Promise<HomeData> {
+  // preview=1：首页只要每类前 9 条卡片，跳过子分类聚合。
+  // 完整聚合要先探测 24 个子分类（20 秒以上），首屏会直接超时。
   const [home, human, comic, ai] = await Promise.all([
     get<ApiListPage>('/home', { page: 1 }),
-    get<ApiListPage>('/category', { type: 'real-drama', page: 1 }),
-    get<ApiListPage>('/category', { type: 'comic-drama', page: 1 }),
-    get<ApiListPage>('/category', { type: 'ai-drama', page: 1 }),
+    get<ApiListPage>('/category', { type: 'real-drama', page: 1, preview: 1 }),
+    get<ApiListPage>('/category', { type: 'comic-drama', page: 1, preview: 1 }),
+    get<ApiListPage>('/category', { type: 'ai-drama', page: 1, preview: 1 }),
   ]);
 
   const top = toCards(home.items);

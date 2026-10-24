@@ -292,7 +292,9 @@ export async function handleApi(request) {
     if (!Number.isInteger(page) || page < 1 || page > 1000)
       return jsonResponse(400, { error: "分页参数无效" });
     if (sub.length > 40) return jsonResponse(400, { error: "子分类参数无效" });
-    return jsonResponse(200, await category(type, sub, page));
+    // preview=1 跳过子分类聚合，只回源站一页。首页卡片用它避免首屏等 20 秒。
+    const preview = searchParams.get("preview") === "1";
+    return jsonResponse(200, await category(type, sub, page, { preview }));
   }
 
   if (pathname === "/api/rank") {

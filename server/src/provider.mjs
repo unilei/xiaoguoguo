@@ -886,10 +886,13 @@ async function fetchSegment(type, pool, start, size) {
   return out.slice(0, size);
 }
 
-export async function category(type, sub = "", page = 1) {
+export async function category(type, sub = "", page = 1, options = {}) {
   const label = CATEGORY_LABELS[type];
   if (!label) throw new Error("不支持的分类");
-  const key = `category:${type}:${sub}:${page}`;
+  // 首页只要每类前几条卡片，不需要聚合总量。聚合要先探测 24 个子分类
+  // （二十多次上游请求，实测 20s+），首页并发 4 个请求时必然拖垮首屏。
+  const preview = Boolean(options.preview);
+  const key = `category:${type}:${sub}:${page}${preview ? ":preview" : ""}`;
   const cached = cacheGet(homeCache, key);
   if (cached) return cached;
 
@@ -912,6 +915,25 @@ export async function category(type, sub = "", page = 1) {
 
   const first = await fetchCategoryPage(type, "", 1);
   const size = first.items.length || 24;
+
+  // 轻量模式：只回源站第 1 页，不探测子分类、不聚合。
+  // total/totalPages 用源站口径，调用方若依赖聚合总量必须走完整模式。
+  if (preview) {
+    const value = {
+      type,
+      label: first.label || label,
+      seo: first.seo,
+      tags: first.tags,
+      items: page === 1 ? first.items : (await fetchCategoryPage(type, "", page)).items,
+      page,
+      total: first.total,
+      totalPages: first.totalPages,
+      aggregated: false,
+      sourceTotal: first.total,
+    };
+    cacheSet(homeCache, key, value);
+    return value;
+  }
 
   let pool = poolGet(type);
   if (!pool) {
@@ -1247,6 +1269,47 @@ export async function previewCoverage(episodeIds) {
 }
 
 
+/**
+ * CENC 索引缓存（moov + 解密用 sample 表 + 已下载的文件头）。
+ *
+ * 播放器一个视频会发几十个 Range 请求，每次都是独立的 HTTP 请求、独立的 reader。
+ * 不缓存的话每个请求都要重拉 256KB 文件头并重解析 sample 表——实测 228ms 加两次
+ * 上游请求，几十次就是十几秒白付。Serverless 冷启动叠加后更明显。
+ *
+ * 按媒体地址缓存，带 TTL 和双重容量上限（条数 + 文件头总字节）。
+ * sample 表只读共享，decryptPartial 内部会复制输入，跨 reader 复用是安全的。
+ */
+const streamIndexCache = new Map();
+const streamIndexInflight = new Map();
+const STREAM_INDEX_TTL = 5 * 60 * 1000;
+const STREAM_INDEX_MAX_ENTRIES = 12;
+const STREAM_INDEX_MAX_BYTES = 32 * 1024 * 1024;
+
+function indexGet(url) {
+  const hit = streamIndexCache.get(url);
+  if (!hit) return null;
+  if (Date.now() - hit.time >= STREAM_INDEX_TTL) {
+    streamIndexCache.delete(url);
+    return null;
+  }
+  // 命中后挪到队尾，保持 LRU 淘汰顺序
+  streamIndexCache.delete(url);
+  streamIndexCache.set(url, hit);
+  return hit;
+}
+
+function indexSet(url, value) {
+  streamIndexCache.delete(url);
+  streamIndexCache.set(url, { time: Date.now(), ...value });
+  let bytes = 0;
+  for (const entry of streamIndexCache.values()) bytes += entry.prefix.length;
+  for (const [key, entry] of streamIndexCache) {
+    if (streamIndexCache.size <= STREAM_INDEX_MAX_ENTRIES && bytes <= STREAM_INDEX_MAX_BYTES) break;
+    streamIndexCache.delete(key);
+    bytes -= entry.prefix.length;
+  }
+}
+
 /** 供流代理使用：建 CENC 索引、按区间解密。 */
 export function createStreamReader(source) {
   const state = { prepared: null, prefix: Buffer.alloc(0) };
@@ -1273,29 +1336,55 @@ export function createStreamReader(source) {
   }
   async function prepare() {
     if (state.prepared) return state.prepared;
-    const first = await remoteRange(0, 256 * 1024 - 1);
-    let head = first.data;
-    const total = first.total || head.length;
-    if (head.length < 16) throw new Error("MP4 头过短");
-    const ftypSize = head.readUInt32BE(0);
-    if (
-      head.toString("ascii", 4, 8) !== "ftyp" ||
-      head.toString("ascii", ftypSize + 4, ftypSize + 8) !== "moov"
-    )
-      throw new Error("MP4 索引不在文件开头");
-    const moovSize = head.readUInt32BE(ftypSize);
-    const moovEnd = ftypSize + moovSize;
-    if (moovSize < 8 || moovEnd > total || moovEnd > 8 * 1024 * 1024)
-      throw new Error("MP4 索引大小异常");
-    if (moovEnd > head.length) {
-      head = Buffer.concat([head, (await remoteRange(head.length, moovEnd - 1)).data]);
+    const cached = indexGet(source.url);
+    if (cached) {
+      state.prepared = cached.prepared;
+      state.prefix = cached.prefix;
+      return state.prepared;
     }
-    head = head.subarray(0, moovEnd);
-    const prepared = source.key
-      ? api.prepareCencHeader(head, source.key)
-      : { header: head, samples: [] };
-    state.prepared = { total, header: prepared.header, samples: prepared.samples };
-    state.prefix = head;
+    // 同一个视频的多个 Range 请求可能并发到达，共用一次索引构建。
+    const pending = streamIndexInflight.get(source.url);
+    if (pending) {
+      const shared = await pending;
+      state.prepared = shared.prepared;
+      state.prefix = shared.prefix;
+      return state.prepared;
+    }
+    const job = (async () => {
+      const first = await remoteRange(0, 256 * 1024 - 1);
+      let head = first.data;
+      const total = first.total || head.length;
+      if (head.length < 16) throw new Error("MP4 头过短");
+      const ftypSize = head.readUInt32BE(0);
+      if (
+        head.toString("ascii", 4, 8) !== "ftyp" ||
+        head.toString("ascii", ftypSize + 4, ftypSize + 8) !== "moov"
+      )
+        throw new Error("MP4 索引不在文件开头");
+      const moovSize = head.readUInt32BE(ftypSize);
+      const moovEnd = ftypSize + moovSize;
+      if (moovSize < 8 || moovEnd > total || moovEnd > 8 * 1024 * 1024)
+        throw new Error("MP4 索引大小异常");
+      if (moovEnd > head.length) {
+        head = Buffer.concat([head, (await remoteRange(head.length, moovEnd - 1)).data]);
+      }
+      head = head.subarray(0, moovEnd);
+      const prepared = source.key
+        ? api.prepareCencHeader(head, source.key)
+        : { header: head, samples: [] };
+      const value = {
+        prepared: { total, header: prepared.header, samples: prepared.samples },
+        prefix: head,
+      };
+      indexSet(source.url, value);
+      return value;
+    })().finally(() => {
+      streamIndexInflight.delete(source.url);
+    });
+    streamIndexInflight.set(source.url, job);
+    const built = await job;
+    state.prepared = built.prepared;
+    state.prefix = built.prefix;
     return state.prepared;
   }
   async function read(start, length) {

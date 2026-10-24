@@ -3,9 +3,14 @@
 // 使用 Vercel 的 Node.js 运行时（完整 Node，含 node:crypto 的 sm3、node:vm 等），
 // 因此可以直接复用 server/src 下的实现，不需要像 Workers 那样改造。
 import { handleApi } from "../server/src/api.mjs";
+import { restoreAccountCookie } from "../server/src/provider.mjs";
+
+// 函数实例没有共享磁盘，登录态只能靠环境变量 ACCOUNT_COOKIE 注入。
+// 未设置时是无副作用的空操作，所以无条件下调用一次即可。
+restoreAccountCookie();
 
 export const config = {
-  // 视频流可能超过默认的函数执行时间，给到上限。
+  // 视频流按 1MB 分块产出，60s 足够走完；Vercel 对匿名/临时部署的上限也是 60s。
   maxDuration: 60,
 };
 

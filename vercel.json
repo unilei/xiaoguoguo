@@ -3,6 +3,7 @@
   "buildCommand": "npm run build",
   "outputDirectory": "web/dist",
   "installCommand": "npm install",
+  "regions": ["hkg1"],
   "rewrites": [
     {
       "source": "/api/(.*)",
