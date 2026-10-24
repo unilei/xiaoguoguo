@@ -3,9 +3,11 @@
   "name": "红果短剧 · 全集解锁",
   "version": "0.1.0",
   "description": "在红果短剧官网解锁全部剧集：匿名解析任意一集的播放地址并在浏览器内解密播放。",
-  "permissions": ["storage"],
+  "permissions": [
+    "storage"
+  ],
   "host_permissions": [
-    "https://hongguoduanju.com/*",
+    "*://*.hongguoduanju.com/*",
     "https://*.fqnovel.com/*",
     "https://*.fqnovelpic.com/*",
     "https://*.qznovelvod.com/*",
@@ -18,9 +20,15 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://hongguoduanju.com/*"],
-      "js": ["content.js"],
-      "css": ["content.css"],
+      "matches": [
+        "*://*.hongguoduanju.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
       "run_at": "document_idle"
     }
   ],

@@ -7,6 +7,7 @@
 
 (function () {
   "use strict";
+  console.log("[XGG] content script 已注入:", location.host, location.pathname);
 
   // ---------------------------------------------------------------- 工具
 
@@ -212,10 +213,19 @@
     });
   }
 
-  // 详情页路由：/detail?series_id=xxx
+  // 官网是 SPA：路由切换不会重载页面，轮询 URL 变化。
+  // 详情页形态：/detail?series_id=xxx（www 与裸域都可能）
   function isDetailPage() {
-    return /^\/detail\b/.test(location.pathname) || location.search.includes("series_id=");
+    return /detail/i.test(location.pathname) || location.search.includes("series_id=");
   }
 
-  if (isDetailPage()) injectButton();
+  function tick() {
+    if (isDetailPage()) injectButton();
+    else {
+      // 离开详情页时移除按钮（面板独立保留，由用户手动关）
+      document.getElementById("xgg-unlock-btn")?.remove();
+    }
+  }
+  tick();
+  setInterval(tick, 800);
 })();
