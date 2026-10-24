@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "description": "在红果短剧官网解锁全部剧集：匿名解析任意一集的播放地址并在浏览器内解密播放。",
   "permissions": [
-    "storage"
+    "storage",
+    "declarativeNetRequest"
   ],
   "host_permissions": [
     "*://*.hongguoduanju.com/*",
@@ -32,5 +33,13 @@
       "run_at": "document_idle"
     }
   ],
-  "icons": {}
+  "icons": {},
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "resource": "rules.json",
+        "id": "strip_origin"
+      }
+    ]
+  }
 }

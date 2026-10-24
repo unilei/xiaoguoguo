@@ -49,7 +49,7 @@ function send(message) {
   });
 }
 
-const VID = process.argv[2] || "7697838648548396094"; // 枝头春意闹 第2集
+const VID = process.argv[2] || "7697855411688311833"; // 枝头春意闹 第2集
 console.log("解析 vid:", VID);
 
 const meta = await send({ type: "play", vid: VID });
