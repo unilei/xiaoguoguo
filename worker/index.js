@@ -51,6 +51,8 @@ import {
   detail as providerDetail,
   category as providerCategory,
   rank as providerRank,
+  cacheGet,
+  cacheSet,
 } from "./provider.js";
 
 const APP_SEARCH_API = "https://api5-normal-sinfonlinea.fqnovel.com/reading/bookapi/search/tab/v";
@@ -572,18 +574,36 @@ function parseJsonish(value) {
   }
 }
 
+const PLAYBACK_TTL = 15 * 60; // 播放地址有时效，缓存 15 分钟
+
 async function resolvePlayback(env, id) {
+  // 每个视频分片请求都会走这里，不缓存的话每段都要重新签名解析，
+  // 免费版 10ms CPU 下很容易超限。
+  const cacheKey = `play:${id}`;
+  const cached = await cacheGet(env, cacheKey);
+  if (cached) {
+    // key 是 Buffer，KV 里存的是 base64，取回来要还原
+    return { ...cached, key: cached.key ? Buffer.from(cached.key, "base64") : null };
+  }
+
   // 顺序：App 播放接口（匿名可用，覆盖整部剧）→ 官网公开预览（只有前几集）。
   // 之前只在登录后才走 App 接口，匿名时第 4 集起就播不了。
+  let source = null;
   try {
-    const source = await appStream(env, id);
-    if (source) return source;
+    source = await appStream(env, id);
   } catch {
-    // 回退到公开预览。
+    source = null;
   }
-  const preview = await publicPreview(id);
-  if (!preview) throw new Error("这一集没有可播放的地址");
-  return preview;
+  if (!source) source = await publicPreview(id);
+  if (!source) throw new Error("这一集没有可播放的地址");
+
+  await cacheSet(
+    env,
+    cacheKey,
+    { ...source, key: source.key ? Buffer.from(source.key).toString("base64") : null },
+    PLAYBACK_TTL
+  );
+  return source;
 }
 
 // ---------------------------------------------------------------- 流代理
@@ -607,18 +627,52 @@ async function streamResponse(env, request, id) {
     return { data, total };
   };
 
-  const first = await remoteRange(0, 256 * 1024 - 1);
-  let head = first.data;
-  const total = first.total || head.length;
-  if (head.length < 16) throw new Error("MP4 头过短");
-  const ftypSize = head.readUInt32BE(0);
-  if (head.toString("ascii", 4, 8) !== "ftyp" || head.toString("ascii", ftypSize + 4, ftypSize + 8) !== "moov")
-    throw new Error("MP4 索引不在文件开头");
-  const moovEnd = ftypSize + head.readUInt32BE(ftypSize);
-  if (moovEnd > total || moovEnd > 8 * 1024 * 1024) throw new Error("MP4 索引大小异常");
-  if (moovEnd > head.length) head = Buffer.concat([head, (await remoteRange(head.length, moovEnd - 1)).data]);
-  head = head.subarray(0, moovEnd);
-  const prepared = source.key ? prepareCencHeader(head, source.key) : { header: head, samples: [] };
+  // MP4 头 + CENC 索引对同一集是固定的，解析一次就够。
+  // 每个分片都重新拉 256KB 头再解析，在免费版 CPU 配额下很容易超时。
+  let prepared = null;
+  let total = 0;
+  const headKey = `mp4head:${id}`;
+  const cachedHead = await cacheGet(env, headKey);
+  if (cachedHead) {
+    // samples[].iv 是 Buffer，JSON 里会变成 {type,data}，必须显式还原
+    prepared = {
+      header: Buffer.from(cachedHead.header, "base64"),
+      samples: (cachedHead.samples || []).map((s) => ({
+        start: s.start,
+        end: s.end,
+        iv: Buffer.from(s.iv, "base64"),
+      })),
+    };
+    total = cachedHead.total;
+  } else {
+    const first = await remoteRange(0, 256 * 1024 - 1);
+    let head = first.data;
+    total = first.total || head.length;
+    if (head.length < 16) throw new Error("MP4 头过短");
+    const ftypSize = head.readUInt32BE(0);
+    if (head.toString("ascii", 4, 8) !== "ftyp" || head.toString("ascii", ftypSize + 4, ftypSize + 8) !== "moov")
+      throw new Error("MP4 索引不在文件开头");
+    const moovEnd = ftypSize + head.readUInt32BE(ftypSize);
+    if (moovEnd > total || moovEnd > 8 * 1024 * 1024) throw new Error("MP4 索引大小异常");
+    if (moovEnd > head.length) head = Buffer.concat([head, (await remoteRange(head.length, moovEnd - 1)).data]);
+    head = head.subarray(0, moovEnd);
+    prepared = source.key ? prepareCencHeader(head, source.key) : { header: head, samples: [] };
+    // 只缓存头部字节和索引；samples 里是偏移表，体积不大
+    await cacheSet(
+      env,
+      headKey,
+      {
+        header: Buffer.from(prepared.header).toString("base64"),
+        samples: prepared.samples.map((s) => ({
+          start: s.start,
+          end: s.end,
+          iv: Buffer.from(s.iv).toString("base64"),
+        })),
+        total,
+      },
+      PLAYBACK_TTL
+    );
+  }
 
   const rangeHeader = request.headers.get("Range");
   let start = 0;
@@ -634,7 +688,9 @@ async function streamResponse(env, request, id) {
   }
 
   // 逐段拉取并解密后写入流，避免把整集读进内存。
-  const CHUNK = 512 * 1024;
+  // 分片越小，单次 pull 里要解的 sample 越少，CPU 峰值越低。
+  // 免费版单请求只有 10ms CPU，512KB 分片在冷启动解析时容易超限。
+  const CHUNK = 128 * 1024;
   let offset = start;
   const stream = new ReadableStream({
     async pull(controller) {

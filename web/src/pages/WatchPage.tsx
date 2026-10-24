@@ -123,6 +123,46 @@ export function WatchPage() {
     noticeTimer.current = window.setTimeout(() => setNotice(''), 2200);
   }, []);
 
+  /**
+   * 视频加载失败时自动重试。
+   *
+   * Worker 版首个分片要做 MP4 索引解析，免费版 CPU 配额紧张时可能失败。
+   * 失败后服务端通常已经把解析结果写进缓存，重试一次基本都能成功。
+   */
+  const retryTimer = useRef<number | null>(null);
+  const retryCount = useRef(0);
+
+  const handleVideoError = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const code = video.error?.code;
+    // 1=ABORTED（用户切集时主动中断），不重试
+    if (code === 1) return;
+    if (retryCount.current >= 2) {
+      showNotice('视频加载失败，请稍后重试或切换其他集');
+      return;
+    }
+    retryCount.current += 1;
+    // 记住失败位置，重试后接着播，不要从头开始
+    const resumeAt = video.currentTime || 0;
+    showNotice(`加载中断，正在重试（${retryCount.current}/2）`);
+    if (retryTimer.current) window.clearTimeout(retryTimer.current);
+    retryTimer.current = window.setTimeout(() => {
+      const current = videoRef.current;
+      if (!current) return;
+      const src = current.src;
+      if (!src) return;
+      // 重新挂一次地址，触发浏览器重新请求。
+      // 必须等 canplay 再播：load() 之后立刻 play() 会被浏览器忽略。
+      const resume = () => {
+        if (resumeAt > 0) current.currentTime = resumeAt;
+        void current.play().catch(() => setPlaying(false));
+      };
+      current.addEventListener('canplay', resume, { once: true });
+      current.load();
+    }, 900);
+  }, [showNotice]);
+
   const showControls = useCallback((force = false) => {
     setControlsHidden(false);
     if (hideTimer.current) window.clearTimeout(hideTimer.current);
@@ -326,6 +366,11 @@ export function WatchPage() {
     const video = videoRef.current;
     if (video) video.playbackRate = rate;
   }, [rate, currentEp]);
+
+  // 换集时重置重试计数，避免上一集的失败次数影响新的一集
+  useEffect(() => {
+    retryCount.current = 0;
+  }, [currentEp]);
 
   // ---------------------------------------------------------------- 视频事件
   const onLoadedMetadata = () => {
@@ -579,6 +624,7 @@ export function WatchPage() {
                 showControls(true);
               }}
               onEnded={onEnded}
+              onError={handleVideoError}
               onClick={() => showControls()}
             />
             {!playing && (

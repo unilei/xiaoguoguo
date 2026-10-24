@@ -57,7 +57,7 @@ const validSeries = (rows) =>
 // ---------------------------------------------------------------- 缓存
 
 /** KV 读写失败不能影响主流程：拿不到就当没有缓存。 */
-async function cacheGet(env, key) {
+export async function cacheGet(env, key) {
   if (!env?.XGG_KV) return null;
   try {
     const raw = await env.XGG_KV.get(key, { type: "json" });
@@ -68,7 +68,7 @@ async function cacheGet(env, key) {
   }
 }
 
-async function cacheSet(env, key, value, ttl = CACHE_TTL) {
+export async function cacheSet(env, key, value, ttl = CACHE_TTL) {
   if (!env?.XGG_KV) return;
   try {
     await env.XGG_KV.put(key, JSON.stringify({ at: Date.now(), ttl, value }));
