@@ -211,6 +211,13 @@ export function WatchPage() {
       return;
     }
     if (loadedEp.current === currentEp) return;
+    const video = videoRef.current;
+    // video 还没挂上时不要推进 loadedEp，否则这次换源会被永久跳过。
+    if (!video) return;
+    // 上一次真正加载的集号是 0 说明这是首次进入（深链），只有这时才
+    // 恢复历史进度。页内切集一律从头播：恢复进度要 seek 到文件中段，
+    // 那段数据得单独请求，慢链路上要二三十秒黑屏，用户会以为播不出来。
+    const resumeFrom = loadedEp.current === 0 ? readProgress(detail.id, currentEp) : 0;
     loadedEp.current = currentEp;
 
     let alive = true;
@@ -219,34 +226,36 @@ export function WatchPage() {
     setBufferPct(0);
     setNotice('');
 
-    fetchPlayback(vid)
-      .then(() => {
-        if (!alive) return;
-        const video = videoRef.current;
-        if (!video) return;
-        pendingSeek.current = readProgress(detail.id, currentEp);
-        video.src = streamUrl(vid);
-        video.load();
-        // load() 会把 playbackRate 重置成 1，所以必须放在 load 之后。
-        // 只设一次还不够：元数据就绪时浏览器会再复位一次，
-        // onLoadedMetadata 里会补第二次。
-        video.playbackRate = rateRef.current;
-        const played = video.play();
-        if (played && typeof played.catch === 'function') {
-          // 自动播放被拦截是正常现象，等用户点大播放按钮
-          played.catch(() => setPlaying(false));
-        }
-      })
-      .catch((problem) => {
+    // 立刻换源，不等播放接口返回。播放接口只用来给出「需要登录」这类
+    // 具体提示，慢链路上它会排在上一个视频流的请求后面，等它就会一直黑屏。
+    pendingSeek.current = resumeFrom;
+    video.src = streamUrl(vid);
+    video.load();
+    // load() 会把 playbackRate 重置成 1，所以必须放在 load 之后。
+    // 只设一次还不够：元数据就绪时浏览器会再复位一次，
+    // onLoadedMetadata 里会补第二次。
+    video.playbackRate = rateRef.current;
+    const played = video.play();
+    if (played && typeof played.catch === 'function') {
+      // 自动播放被拦截是正常现象，等用户点大播放按钮
+      played.catch(() => setPlaying(false));
+    }
+
+    // 播放接口只用来给出「需要登录」这类具体提示，不阻塞起播。
+    // 故意延后发：换集瞬间视频流正在抢函数实例，这时并发一个接口请求
+    // 只会让两边都变慢；等首块数据下来再问，几乎不会失败。
+    const probeTimer = window.setTimeout(() => {
+      fetchPlayback(vid).catch((problem) => {
         if (!alive) return;
         const apiError = problem instanceof ApiError ? problem : null;
         if (apiError?.status === 402) showNotice('这一集需要登录后才能播放。');
-        else showNotice(apiError?.message || '取播放地址失败');
-        setPlaying(false);
+        else if (apiError) showNotice(apiError.message || '取播放地址失败');
       });
+    }, 4000);
 
     return () => {
       alive = false;
+      window.clearTimeout(probeTimer);
     };
   }, [detail, currentEp, showNotice]);
 
