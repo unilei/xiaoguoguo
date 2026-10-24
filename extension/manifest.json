@@ -33,12 +33,11 @@
       "run_at": "document_idle"
     }
   ],
-  "icons": {},
   "declarative_net_request": {
     "rule_resources": [
       {
-        "resource": "rules.json",
-        "id": "strip_origin"
+        "id": "strip_origin",
+        "path": "rules.json"
       }
     ]
   }
