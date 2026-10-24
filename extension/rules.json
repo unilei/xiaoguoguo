@@ -5,14 +5,28 @@
     "action": {
       "type": "modifyHeaders",
       "requestHeaders": [
-        { "header": "Origin", "operation": "remove" },
-        { "header": "Referer", "operation": "remove" }
+        {
+          "header": "Origin",
+          "operation": "remove"
+        },
+        {
+          "header": "Referer",
+          "operation": "remove"
+        }
       ]
     },
     "condition": {
-      "requestDomains": ["fqnovel.com", "fqnovelpic.com"],
-      "resourceTypes": ["xmlhttprequest"],
-      "tabIds": [-1]
+      "requestDomains": [
+        "fqnovel.com",
+        "fqnovelpic.com"
+      ],
+      "resourceTypes": [
+        "xmlhttprequest",
+        "other"
+      ],
+      "tabIds": [
+        -1
+      ]
     }
   },
   {
@@ -21,14 +35,27 @@
     "action": {
       "type": "modifyHeaders",
       "requestHeaders": [
-        { "header": "Origin", "operation": "remove" },
-        { "header": "Referer", "operation": "remove" }
+        {
+          "header": "Origin",
+          "operation": "remove"
+        },
+        {
+          "header": "Referer",
+          "operation": "remove"
+        }
       ]
     },
     "condition": {
-      "requestDomains": ["qznovelvod.com"],
-      "resourceTypes": ["xmlhttprequest"],
-      "tabIds": [-1]
+      "requestDomains": [
+        "qznovelvod.com"
+      ],
+      "resourceTypes": [
+        "xmlhttprequest",
+        "other"
+      ],
+      "tabIds": [
+        -1
+      ]
     }
   }
 ]
