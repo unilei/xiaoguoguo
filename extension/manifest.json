@@ -37,6 +37,7 @@
     "rule_resources": [
       {
         "id": "strip_origin",
+        "enabled": true,
         "path": "rules.json"
       }
     ]
