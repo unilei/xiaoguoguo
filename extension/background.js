@@ -29,6 +29,51 @@ import {
   decryptSpadeUrl,
 } from "./lib/cenc.js";
 
+// ---------------------------------------------------------------- 剥 Origin 头
+//
+// 扩展的 service worker 发跨域请求时，Chrome 会自动附加
+// Origin: chrome-extension://<id>。字节的播放 API 见到这个头直接回 403
+//（实测：干净请求 200 / 带 ext Origin 403）。
+//
+// 用 session 规则移除它。静态规则（manifest 里的 declarative_net_request）
+// 不支持 tabIds，而我们要把影响面限制在「不来自任何标签页的请求」，
+// 所以只能动态注册 session 规则。
+const DNR_RULE_ID = 9001;
+
+async function installHeaderRules() {
+  try {
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [DNR_RULE_ID],
+      addRules: [
+        {
+          id: DNR_RULE_ID,
+          priority: 1,
+          action: {
+            type: "modifyHeaders",
+            requestHeaders: [
+              { header: "Origin", operation: "remove" },
+              { header: "Referer", operation: "remove" },
+            ],
+          },
+          condition: {
+            requestDomains: ["fqnovel.com", "fqnovelpic.com", "qznovelvod.com"],
+            resourceTypes: ["xmlhttprequest", "other"],
+            tabIds: [chrome.tabs.TAB_ID_NONE],
+          },
+        },
+      ],
+    });
+  } catch (error) {
+    // 规则装不上不该让整个扩展不可用：请求仍可尝试，只是可能 403
+    console.warn("[XGG] 安装请求头规则失败:", error?.message);
+  }
+}
+
+// SW 每次唤醒都要确保规则在（session 规则随浏览器会话失效）
+void installHeaderRules();
+chrome.runtime.onInstalled.addListener(() => void installHeaderRules());
+chrome.runtime.onStartup.addListener(() => void installHeaderRules());
+
 const PLAYER_HOST = "https://api5-normal-lq.fqnovel.com";
 
 const PLAYER_QUERY = {
