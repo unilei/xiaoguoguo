@@ -765,7 +765,7 @@ async function fetchCategoryPage(type, sub, page) {
 const POOL_TTL = 10 * 60 * 1000;
 /** 单次补抓最多请求多少页，防止一次打爆源站 */
 const SEGMENT_FETCH_BUDGET = 40;
-const SEGMENT_CONCURRENCY = 3;
+const SEGMENT_CONCURRENCY = 8;
 
 /** type → { segments, seen, cache, meta, time } */
 const categoryPools = new Map();
@@ -775,6 +775,53 @@ function poolGet(type) {
   if (hit && Date.now() - hit.time < POOL_TTL) return hit;
   if (hit) categoryPools.delete(type);
   return null;
+}
+
+/** type → Promise<pool>，避免并发请求重复建池 */
+const poolBuilds = new Map();
+
+/** 同步建池（深页需要，调用方必须等）。 */
+async function ensurePool(type, first) {
+  const pending = poolBuilds.get(type);
+  if (pending) return pending;
+  const job = (async () => {
+    const probed = await probeTags(type, first.tags);
+    // 探测大面积失败时不要建池：残池会让深页返回空数组，
+    // 而且会被当成正常结果缓存 10 分钟。宁可这次报错让前端重试。
+    if (first.tags.length >= 8 && probed.length < first.tags.length / 2) {
+      throw new Error("分类子项探测失败，请稍后重试");
+    }
+    const pool = {
+      segments: buildSegments(first, probed),
+      cache: new Map(),
+      meta: { label: first.label, seo: first.seo, tags: first.tags },
+      sourceTotal: first.total,
+      total: 0,
+      time: Date.now(),
+    };
+    pool.total = pool.segments.reduce((sum, seg) => sum + seg.count, 0);
+    categoryPools.set(type, pool);
+    // 池子建好前回给前端的是源站口径（34 页），聚合口径是 400+ 页。
+    // 缓存里的旧页要作废，否则翻页器一直停在 34 页。
+    for (const key of [...homeCache.keys()]) {
+      if (key.startsWith(`category:${type}:`)) homeCache.delete(key);
+    }
+    return pool;
+  })().finally(() => poolBuilds.delete(type));
+  poolBuilds.set(type, job);
+  return job;
+}
+
+/**
+ * 后台建池，不阻塞当前请求。
+ *
+ * Vercel 的出站并发有限，24 个子分类探测要 20 秒以上。源站前 34 页本身
+ * 不依赖聚合结果，所以先回这一页，池子异步建好后续请求再切到聚合口径。
+ * 建池失败只是下次重试，不影响已经返回的页面。
+ */
+function startPoolBuild(type, first) {
+  if (poolBuilds.has(type) || poolGet(type)) return;
+  ensurePool(type, first).catch(() => undefined);
 }
 
 /**
@@ -801,19 +848,30 @@ function buildSegments(first, probed) {
 
 /** 探测各子分类的 total/totalPages（每个只抓第 1 页，很便宜）。 */
 async function probeTags(type, tags) {
+  // 源站按 IP 限流。本地出口独占，24 路并发 1.3 秒就够；Vercel 的出站 IP
+  // 是共享的，24 路会被压成近似串行（实测 24 秒）并有一部分直接失败。
+  // 6 路是两边都能跑顺的档位，单条失败再重试一次。
+  const PROBE_CONCURRENCY = 6;
   const probed = [];
-  for (let i = 0; i < tags.length; i += 4) {
-    const batch = tags.slice(i, i + 4);
-    const results = await Promise.all(
-      batch.map((tag) =>
-        fetchCategoryPage(type, tag.id, 1).then(
-          (r) => ({ id: tag.id, total: r.total, totalPages: r.totalPages }),
-          () => null
-        )
-      )
-    );
-    for (const r of results) if (r && r.total > 0) probed.push(r);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < tags.length) {
+      const tag = tags[cursor++];
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const r = await fetchCategoryPage(type, tag.id, 1);
+          if (r.total > 0)
+            probed.push({ id: tag.id, total: r.total, totalPages: r.totalPages });
+          break;
+        } catch {
+          // 最后一次仍失败就跳过这个子分类，不影响其余段
+        }
+      }
+    }
   }
+  await Promise.all(
+    Array.from({ length: Math.min(PROBE_CONCURRENCY, tags.length) }, worker)
+  );
   return probed;
 }
 
@@ -937,17 +995,29 @@ export async function category(type, sub = "", page = 1, options = {}) {
 
   let pool = poolGet(type);
   if (!pool) {
-    const probed = await probeTags(type, first.tags);
-    pool = {
-      segments: buildSegments(first, probed),
-      cache: new Map(),
-      meta: { label: first.label, seo: first.seo, tags: first.tags },
-      sourceTotal: first.total,
-      total: 0,
-      time: Date.now(),
-    };
-    pool.total = pool.segments.reduce((sum, seg) => sum + seg.count, 0);
-    categoryPools.set(type, pool);
+    // 源站前 34 页不依赖聚合结果，先把这一页回了，池子在后台建。
+    // Vercel 的出站并发有限（24 个探测实际只有 ~2 并发，实测 24s），
+    // 同步等池子会把首屏拖到超时；本地不受限所以以前没暴露。
+    if (page <= first.totalPages) {
+      startPoolBuild(type, first);
+      const single = page === 1 ? first : await fetchCategoryPage(type, "", page);
+      const value = {
+        type,
+        label: single.label || label,
+        seo: single.seo,
+        tags: single.tags,
+        items: single.items,
+        page,
+        total: single.total,
+        totalPages: single.totalPages,
+        aggregated: false,
+        sourceTotal: single.total,
+        poolPending: true,
+      };
+      cacheSet(homeCache, key, value);
+      return value;
+    }
+    pool = await ensurePool(type, first);
   }
   pool.time = Date.now();
 
@@ -1254,15 +1324,32 @@ export async function previewCoverage(episodeIds) {
       return list.length;
     }
   } catch {
-    // 落到公开预览探测。
+    // App 接口只是慢或临时失败时，不要退化成 40 次逐集探测：
+    // 匿名状态下它本来就能覆盖整部剧，误判成「只有前几集可播」比
+    // 多等 20 秒更糟。缓存 60 秒后重试，避免把偶发失败钉死。
+    if (!hasAccountCookie()) {
+      cacheSet(coverageCache, key, list.length);
+      return list.length;
+    }
   }
 
   let count = 0;
   const limit = Math.min(list.length, 40);
-  for (let index = 0; index < limit; index += 1) {
-    const playable = await publicPreview(String(list[index]));
-    if (!playable) break;
-    count += 1;
+  // 兜底探测逐集串行在慢链路上要 20 秒以上，改成小并发。
+  // 公开预览是「前 N 集可播」，所以仍然按顺序判定到第一个不可播为止。
+  const BATCH = 4;
+  for (let index = 0; index < limit; index += BATCH) {
+    const slice = list.slice(index, Math.min(index + BATCH, limit));
+    const results = await Promise.all(
+      slice.map((id) => publicPreview(String(id)).catch(() => null))
+    );
+    for (const ok of results) {
+      if (!ok) {
+        cacheSet(coverageCache, key, count);
+        return count;
+      }
+      count += 1;
+    }
   }
   cacheSet(coverageCache, key, count);
   return count;
