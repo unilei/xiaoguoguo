@@ -434,15 +434,152 @@ async function accountStream(env, id) {
   throw lastError || new Error("播放地址解析失败");
 }
 
-async function resolvePlayback(env, id) {
-  const cookie = await getAccountCookie(env);
-  if (cookie) {
+const PLAYER_HOST = "https://api5-normal-lq.fqnovel.com";
+
+const PLAYER_QUERY = {
+  ac: "wifi",
+  aid: "8662",
+  app_name: "novelread",
+  channel: "xiaomi_8662_64",
+  compliance_status: "0",
+  device_brand: "xiaomi",
+  device_type: "23127PN0CC",
+  dpi: "460",
+  dragon_device_type: "phone",
+  host_abi: "arm64-v8a",
+  is_android_pad_screen: "0",
+  language: "zh",
+  manifest_version_code: "73932",
+  need_personal_recommend: "1",
+  os: "android",
+  os_api: "34",
+  os_version: "14",
+  player_so_load: "1",
+  pv_player: "73932",
+  resolution: "1200*2670",
+  ssmix: "a",
+  update_version_code: "73932",
+  version_code: "73932",
+  version_name: "7.3.9.32",
+};
+
+const PLAYER_BIZ = {
+  detail_page_version: 0,
+  device_level: 4,
+  disable_digg_stat: false,
+  need_all_video_definition: true,
+  need_mp4_align: false,
+  use_os_player: false,
+  use_server_dns: false,
+  video_platform: 1024,
+};
+
+/**
+ * 匿名解析一集的播放地址（App 播放接口）。
+ *
+ * 这条路不需要登录：平台对移动端下发的 video_list 自带完整地址，
+ * 只有官网 /video/public/ 那条路才限制前几集（通常只有 3 集）。
+ * 之前 worker 只实现了公开预览，导致第 4 集之后全部「没有可播放的地址」。
+ */
+async function appStream(env, id) {
+  const identity = await ensureIdentity(env);
+  const values = {
+    ...PLAYER_QUERY,
+    device_id: identity.deviceId,
+    iid: identity.installId,
+  };
+  const body = {
+    biz_param: PLAYER_BIZ,
+    mixed_video_id_map: { "1004": [String(id)] },
+  };
+  const signed = signedRequest(`${PLAYER_HOST}/novel/player/multi_video_model/v1/`, values, body);
+  const accountCookie = await getAccountCookie(env);
+  if (accountCookie) signed.headers.Cookie = accountCookie;
+  else if (identity.cookie) signed.headers.Cookie = identity.cookie;
+
+  const response = await fetch(signed.url, {
+    method: "POST",
+    headers: signed.headers,
+    body: signed.body,
+  });
+  if (!response.ok) throw new Error(`播放接口 HTTP ${response.status}`);
+  const data = await response.json();
+  const code = Number(data?.code ?? data?.Code ?? 0);
+  if (code !== 0) throw new Error(`播放接口暂不可用（${code}）`);
+
+  const entry = data?.data?.[String(id)];
+  if (!entry) throw new Error("播放接口没有返回这一集");
+  const model = parseJsonish(entry.video_model);
+  if (!model) throw new Error("播放接口没有返回播放模型");
+
+  const list = model.video_list;
+  const items = Array.isArray(list) ? list : Object.values(list || {});
+  const rows = items
+    .map((item) => {
+      const meta = item.video_meta || item;
+      const definition = String(item.definition || meta.definition || "");
+      const encoded = String(item.main_url || "");
+      let url = "";
+      try {
+        url = Buffer.from(encoded, "base64").toString("utf8");
+      } catch {
+        url = encoded;
+      }
+      return {
+        url,
+        quality: definition || "360p",
+        number: Number(definition.replace(/[^\d]/g, "")) || 0,
+        spadeA: item.spade_a || meta.spade_a || "",
+        keySeed: model.key_seed || "",
+      };
+    })
+    .filter((row) => /^https?:\/\//.test(row.url));
+
+  if (!rows.length) throw new Error("没有可用清晰度");
+
+  // 默认取不超过 720P 的最高档：再高对短剧没意义，还更容易被限速。
+  const usable = rows.filter((row) => row.number && row.number <= 720);
+  const selected = (usable.length ? usable : rows).sort((a, b) => b.number - a.number)[0];
+
+  // spade_a 存在时地址是被 SPADE 包过的，要先解出真实地址。
+  let url = selected.url;
+  if (selected.spadeA && selected.keySeed) {
     try {
-      const source = await accountStream(env, id);
-      if (source) return source;
+      url = decryptSpadeUrl(url, Buffer.from(selected.keySeed, "base64"));
     } catch {
-      // 回退到公开预览。
+      // 解不出来就用原地址；多数短剧并不加密。
     }
+  }
+  if (!/^https?:\/\//.test(url)) throw new Error("播放地址无效");
+
+  const key = selected.spadeA ? deriveContentKey(selected.spadeA) : null;
+  return {
+    url,
+    key,
+    quality: selected.quality.toUpperCase().replace("P", "P"),
+    kind: accountCookie ? "account" : "public",
+  };
+}
+
+/** 把可能是字符串的 JSON 字段解析成对象。 */
+function parseJsonish(value) {
+  if (value && typeof value === "object") return value;
+  if (typeof value !== "string") return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+async function resolvePlayback(env, id) {
+  // 顺序：App 播放接口（匿名可用，覆盖整部剧）→ 官网公开预览（只有前几集）。
+  // 之前只在登录后才走 App 接口，匿名时第 4 集起就播不了。
+  try {
+    const source = await appStream(env, id);
+    if (source) return source;
+  } catch {
+    // 回退到公开预览。
   }
   const preview = await publicPreview(id);
   if (!preview) throw new Error("这一集没有可播放的地址");
