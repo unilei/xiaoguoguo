@@ -7,7 +7,7 @@
 
 (function () {
   "use strict";
-  console.log("[XGG] content script 已注入:", location.host, location.pathname);
+  console.log("[XGG] 全集解锁已加载：", location.host + location.pathname);
 
   // ---------------------------------------------------------------- 工具
 
@@ -200,6 +200,9 @@
 
     const epsBox = el.querySelector(".xgg-eps");
     epsBox.innerHTML = "";
+    const currentVid = currentVidFromPlayerUrl();
+    let highlightIndex = -1;
+    if (currentVid) highlightIndex = series.vid_list.findIndex((v) => String(v) === currentVid);
     series.vid_list.forEach((vid, index) => {
       const btn = document.createElement("button");
       btn.className = "xgg-ep";
@@ -211,18 +214,39 @@
       });
       epsBox.appendChild(btn);
     });
+    // 播放页带着当前集进来时，滚动到并高亮那一集
+    if (highlightIndex >= 0) {
+      const btn = epsBox.children[highlightIndex];
+      if (btn) {
+        btn.classList.add("active");
+        btn.scrollIntoView({ block: "center" });
+        playEpisode(String(series.vid_list[highlightIndex]), highlightIndex + 1, info);
+      }
+    }
   }
 
   // 官网是 SPA：路由切换不会重载页面，轮询 URL 变化。
-  // 详情页形态：/detail?series_id=xxx（www 与裸域都可能）
-  function isDetailPage() {
-    return /detail/i.test(location.pathname) || location.search.includes("series_id=");
+  // 两种目标页：
+  //   详情页 /detail?series_id=xxx
+  //   播放页 /player/:seriesId(/:vid)  ← 用户实际看剧的地方
+  function isTargetPage() {
+    return (
+      /detail/i.test(location.pathname) ||
+      location.search.includes("series_id=") ||
+      /^\/player\//.test(location.pathname)
+    );
+  }
+
+  /** 播放页 URL /player/:seriesId(/:vid) → 取当前集的 vid */
+  function currentVidFromPlayerUrl() {
+    const m = /^\/player\/\d+\/(\d+)/.exec(location.pathname);
+    return m ? m[1] : null;
   }
 
   function tick() {
-    if (isDetailPage()) injectButton();
+    if (isTargetPage()) injectButton();
     else {
-      // 离开详情页时移除按钮（面板独立保留，由用户手动关）
+      // 离开目标页时移除按钮（面板独立保留，由用户手动关）
       document.getElementById("xgg-unlock-btn")?.remove();
     }
   }
