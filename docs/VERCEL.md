@@ -38,6 +38,11 @@ npx vercel deploy     # 部署到预览环境
 npx vercel deploy --prod   # 部署到生产环境
 ```
 
+## 当前部署
+
+生产环境：<https://xiaoguoguo.vercel.app>（Vercel 项目 `xiaoguoguo`，账号 `unilei-github`）。
+改动后用 `npx vercel deploy --prod` 重新发布。
+
 ## 配置说明
 
 `vercel.json` 里做了五件事：
