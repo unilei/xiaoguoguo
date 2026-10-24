@@ -1,7 +1,7 @@
 // 纯 JS 的 SM3（GB/T 32905-2016）。
 //
-// Cloudflare Workers 的 node:crypto 不支持 sm3（实测 "Digest method not supported"），
-// 而签名头 x-medusa / 分支号计算都要用它，所以这里自带一份实现。
+// 部分运行时的 node:crypto 不带 sm3，而签名头 x-medusa / 分支号计算都要用它，
+// 所以这里自带一份实现。
 // 输出与 Node 原生 crypto.createHash("sm3") 逐字节一致（已对照测试）。
 const IV = [
   0x7380166f, 0x4914b2b9, 0x172442d7, 0xda8a0600,

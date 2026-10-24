@@ -29,7 +29,7 @@ function loadVendorSource() {
 
 const vendorSource = loadVendorSource();
 
-// Cloudflare Workers 的 node:crypto 没有 sm3（实测 "Digest method not supported"），
+// 部分 Node 构建的 node:crypto 不带 sm3（会抛 "Digest method not supported"），
 // 用一个只补 sm3 的包装层顶上去，其余算法仍走原生实现。
 const cryptoShim = {
   ...crypto,

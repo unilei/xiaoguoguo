@@ -54,7 +54,7 @@ GET  /api/episodes/.../stream                 ✅ 10MB MP4，支持 Range
 
 `server/src/account.mjs` 把 Cookie 存在进程内存。部署到 Vercel 后每次冷启动都要重新填。README 已经承认这点，但没有给出多实例方案。
 
-建议：给账号态加一个可选的持久化后端（Vercel KV / Upstash Redis / Cloudflare KV），用 `x-xgg-device` 头做 key。`api.ts` 里已经有这个 header 的机制，只是服务端没用来存账号。
+建议：给账号态加一个可选的持久化后端（Vercel KV / Upstash Redis），用 `x-xgg-device` 头做 key。`api.ts` 里已经有这个 header 的机制，只是服务端没用来存账号。
 
 ### P1 — 功能对齐
 
@@ -80,7 +80,6 @@ GET  /api/episodes/.../stream                 ✅ 10MB MP4，支持 Range
 
 - `server/src/provider.mjs` 644 行，`api.mjs` 320 行，路由用 if 链匹配。加到 20 个接口后会很难维护，建议引入轻量路由表。
 - 没有测试。`HGTV-ref` 有 20+ 个 Kotlin 单测覆盖签名和 CENC，Web 版至少应该给 `provider.mjs` 的解析函数补几个快照测试。
-- `worker/` 的 Cloudflare 版本已知不可用（`node:crypto` 缺 `createHash`），README 已说明，但如果要长期维护建议要么补齐 sm3+createHash 的 polyfill，要么直接放弃 Worker 分支只保留 Vercel。
 
 ---
 

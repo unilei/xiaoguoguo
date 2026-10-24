@@ -165,16 +165,12 @@ Vercel 跑完整 Node.js，服务端可以直接复用，无需改造。
 
 详见 [Vercel 部署说明](docs/VERCEL.md)。
 
-> 也可以用 Cloudflare Workers，但 Workers 的 `node:crypto` 缺少 `createHash`，
-> 手机号登录等功能会报错，不推荐。见 [Cloudflare 部署说明](docs/CLOUDFLARE.md)。
-
 ## 架构
 
 ```
 web/      React 19 + Vite + TypeScript 单页应用
 server/   Node HTTP 服务：官网 SSR 解析、设备注册、请求签名、播放代理
           └─ src/vendor/hongguo.cjs  固定版本的上游协议实现（GPL-3.0）
-worker/   Cloudflare Workers 入口：同一套接口，vendor 静态转换后打包
 ```
 
 服务端负责三件事：
