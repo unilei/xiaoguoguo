@@ -125,7 +125,7 @@ GET  /api/episodes/.../stream                 ✅ 10MB MP4，支持 Range
 ## 六、如果现在就要跑起来
 
 ```bash
-cd /Users/lei/xiaoguoguo/xiaoguoguo
+cd ~/MyAIProjects/xiaoguoguo/xiaoguoguo
 
 npm install
 npm run build

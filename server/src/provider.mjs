@@ -1063,6 +1063,80 @@ export async function category(type, sub = "", page = 1, options = {}) {
 // ---------------------------------------------------------------- 播放地址
 
 const playbackCache = new Map();
+/** 同一集的并发解析去重（播放页会同时问 /play 和 /stream）。 */
+const playbackInflight = new Map();
+
+// ---------------------------------------------------------------- 设备自愈
+//
+// 平台按 device_id 放行内容接口。设备被风控后，播放接口对所有剧集都回
+// 200 + 空体（不是报错码，所以只能靠空体识别），而重新注册一台匿名设备
+// 立刻恢复。v1.2.32 客户端的对应行为是「装一次换一台设备」，这里做成
+// 检测到空体就轮换一次。
+let lastIdentityRotation = 0;
+const IDENTITY_ROTATE_COOLDOWN = 10 * 60 * 1000;
+
+/** 重新注册设备并落盘，清掉所有跟旧设备绑定的缓存。 */
+async function rotateIdentity() {
+  const file = identityFile();
+  if (file) {
+    try {
+      // 留一份旧设备备份：后面想核对是不是同一台机器被拉黑时用得上。
+      fs.copyFileSync(file, `${file}.rejected-${Date.now()}`);
+    } catch {
+      // 备份失败不影响轮换本身。
+    }
+  }
+  identity = null;
+  const { registerDevice } = await import("./device-register.mjs");
+  const registered = await registerDevice();
+  const next = {
+    deviceId: registered.deviceId,
+    installId: registered.installId,
+    cookie: Object.entries(registered.cookies)
+      .map(([name, value]) => `${name}=${value}`)
+      .join("; "),
+  };
+  storeIdentity(next);
+  identity = next;
+  playbackCache.clear();
+  coverageCache.clear();
+  // 新设备大概率在所有线路上都能通，线路评分与冷却全部归零重新学习。
+  hostHealth.clear();
+  hostCoolingUntil.clear();
+  hostProbing.clear();
+  console.warn(
+    JSON.stringify({ event: "identity_rotated", deviceId: next.deviceId })
+  );
+  return next;
+}
+
+/**
+ * 解析播放地址；设备被判风控时换一台设备重试一次。
+ *
+ * 冷却时间避免平台持续拒绝时反复注册（注册本身也有频率限制），
+ * 冷却期内仍然直接抛出原错误，由上层退回官网公开预览。
+ */
+async function appStreamWithRecovery(id) {
+  try {
+    return await appStream(id);
+  } catch (error) {
+    if (error?.code !== DEVICE_REJECTED) throw error;
+    if (Date.now() - lastIdentityRotation < IDENTITY_ROTATE_COOLDOWN) throw error;
+    lastIdentityRotation = Date.now();
+    try {
+      await rotateIdentity();
+    } catch (rotateError) {
+      console.error(
+        JSON.stringify({
+          event: "identity_rotate_failed",
+          message: rotateError?.message,
+        })
+      );
+      throw error;
+    }
+    return appStream(id);
+  }
+}
 
 /**
  * 公开预览：官网对每部剧的前几集提供 /video/public/<vid>/360p.mp4 直链，
@@ -1076,6 +1150,16 @@ async function publicPreview(id) {
       headers: { "User-Agent": PLAYER_UA, "Accept-Encoding": "identity" },
       signal: AbortSignal.timeout(15000),
     });
+    if (process.env.XGG_DEBUG) {
+      console.warn(
+        JSON.stringify({
+          event: "public_preview",
+          id,
+          status: response.status,
+          contentType: response.headers.get("content-type"),
+        })
+      );
+    }
     if (!response.ok) return null;
     const type = response.headers.get("content-type") || "";
     if (!type.startsWith("video/")) return null;
@@ -1096,7 +1180,74 @@ async function publicPreview(id) {
  * 返回的 data[vid].video_model 是 JSON 字符串，里面的 video_list 是
  * { video_1: {definition:"360p", main_url:"<base64>", spade_a}, ... }。
  */
-const PLAYER_HOST = "https://api5-normal-lq.fqnovel.com";
+/**
+ * 播放接口的线路池。
+ *
+ * v1.2.32（2026-11-23 构建）二进制里同时保留了 api3/api5-normal、lq/lf/hl 与
+ * sinfonlinea/b/c 一整组线路（字符串常量按 `api3-normal-lq → api5-normal-hl →
+ * api5-normal-lf → api3-normal-lf → api3-normal-hl`、`sinfonlinea/b/c` 成片排列），
+ * 说明客户端在多条线路间回退。
+ *
+ * 2026-11-24 实测 13 条线路：新注册设备全通；被平台打过标的设备在 **lq 与
+ * sinfonline 两组**上回 200 空体，hl / lf / normal 组仍然正常。所以顺序不能把
+ * lq 写死在第一，而是按运行时的成功率动态排序（见 orderedHosts）。
+ */
+const PLAYER_HOSTS = [
+  "https://api5-normal-lq.fqnovel.com",
+  "https://api5-normal-hl.fqnovel.com",
+  "https://api5-normal-lf.fqnovel.com",
+  "https://api5-normal.fqnovel.com",
+  "https://api3-normal-hl.fqnovel.com",
+  "https://api3-normal.fqnovel.com",
+];
+
+/**
+ * 线路状态。三个维度缺一不可：
+ * - score：成功 +1 / 空体 -1，决定长期排序
+ * - cooling：空体后冷却 2 分钟，冷却期内不主动试（被打标的线路会连续空几千次，
+ *   每次都先撞一遍纯属浪费，还会加深风控画像）
+ * - probing：这条线路正被其它请求试。冷启动时 5 个详情页并发，如果不加这个标记，
+ *   5 个请求会同时选中排第一的 lq 一起撞空体（实测 5 并发打出 9 个上游请求，
+ *   正常应该 5 个）。
+ */
+const hostHealth = new Map();
+const hostCoolingUntil = new Map();
+const hostProbing = new Set();
+
+const HOST_COOLDOWN_MS = 2 * 60 * 1000;
+
+/** 按「未冷却 > 冷却」「分数高 > 低」「原始顺序」排出一轮尝试计划。 */
+function orderedHosts() {
+  const now = Date.now();
+  return PLAYER_HOSTS.map((host, index) => ({
+    host,
+    index,
+    score: hostHealth.get(host) || 0,
+    cooling: (hostCoolingUntil.get(host) || 0) > now,
+    probing: hostProbing.has(host),
+  })).sort((a, b) => {
+    if (a.cooling !== b.cooling) return a.cooling ? 1 : -1;
+    if (a.score !== b.score) return b.score - a.score;
+    return a.index - b.index;
+  });
+}
+
+function markHost(host, ok) {
+  const next = (hostHealth.get(host) || 0) + (ok ? 1 : -1);
+  hostHealth.set(host, Math.max(-5, Math.min(3, next)));
+  if (ok) hostCoolingUntil.delete(host);
+  else hostCoolingUntil.set(host, Date.now() + HOST_COOLDOWN_MS);
+}
+
+/** 播放接口的请求路径。v1.2.32 的 player/default/preload 变体是预加载用的，主路径未变。 */
+const PLAYER_PATH = "/novel/player/multi_video_model/v1/";
+
+/** 设备被平台风控时返回的错误标记：调用方据此重新注册设备。 */
+const DEVICE_REJECTED = "DEVICE_REJECTED";
+
+function deviceRejected(message) {
+  return Object.assign(new Error(message), { code: DEVICE_REJECTED });
+}
 
 const PLAYER_QUERY = {
   ac: "wifi",
@@ -1154,21 +1305,77 @@ async function appStream(id) {
     biz_param: PLAYER_BIZ,
     mixed_video_id_map: { "1004": [String(id)] },
   };
-  const signed = signedRequest(
-    `${PLAYER_HOST}/novel/player/multi_video_model/v1/`,
-    values,
-    body
-  );
-  if (accountCookie) signed.headers.Cookie = accountCookie;
 
-  const response = await fetch(signed.url, {
-    method: "POST",
-    headers: signed.headers,
-    body: signed.body,
-    signal: AbortSignal.timeout(30000),
-  });
-  if (!response.ok) throw new Error(`播放接口 HTTP ${response.status}`);
-  const data = await response.json();
+  let data = null;
+  let rejection = "没有可用线路";
+  const attempts = orderedHosts();
+  // 第一轮跳过「冷却中」和「正被别的请求探测」的线路，全挂了再强制试一轮，
+  // 保证不会因为所有线路都在冷却而彻底放弃。
+  const plan = [
+    ...attempts.filter((entry) => !entry.cooling && !entry.probing),
+    ...attempts.filter((entry) => entry.cooling || entry.probing),
+  ];
+  for (const entry of plan) {
+    const host = entry.host;
+    hostProbing.add(host);
+    try {
+      const signed = signedRequest(`${host}${PLAYER_PATH}`, values, body);
+      if (accountCookie) signed.headers.Cookie = accountCookie;
+
+      let response;
+      try {
+        response = await fetch(signed.url, {
+          method: "POST",
+          headers: signed.headers,
+          body: signed.body,
+          signal: AbortSignal.timeout(30000),
+        });
+      } catch (error) {
+        rejection = `${host} 网络异常：${error?.message}`;
+        continue;
+      }
+      if (!response.ok) {
+        rejection = `${host} HTTP ${response.status}`;
+        markHost(host, false);
+        continue;
+      }
+
+      // 平台在设备被风控时回 200 + 空体。直接 response.json() 只会得到
+      // "Unexpected end of JSON input"，看不出是风控还是线路抖动，所以先取文本。
+      const raw = await response.text();
+      if (process.env.XGG_DEBUG) {
+        console.warn(
+          JSON.stringify({
+            event: "app_stream_response",
+            host,
+            status: response.status,
+            length: raw.length,
+            contentType: response.headers.get("content-type"),
+            head: raw.slice(0, 200),
+          })
+        );
+      }
+      if (!raw.trim()) {
+        // 空体说明这台设备在这条线路上被限流，冷却期内不再主动试。
+        rejection = `${host} 返回 200 空体`;
+        markHost(host, false);
+        continue;
+      }
+      try {
+        data = JSON.parse(raw);
+        markHost(host, true);
+        break;
+      } catch {
+        rejection = `${host} 返回非 JSON（${raw.length} 字节）`;
+        markHost(host, false);
+      }
+    } finally {
+      hostProbing.delete(host);
+    }
+  }
+
+  if (!data) throw deviceRejected(`播放接口无数据：${rejection}`);
+
   const code = Number(data?.code ?? data?.Code ?? 0);
   if (code !== 0) throw new Error(`播放接口暂不可用（${code}）`);
 
@@ -1287,10 +1494,29 @@ export async function resolvePlayback(id) {
   const key = String(id);
   const cached = cacheGet(playbackCache, key);
   if (cached) return cached;
+
+  // 播放页进来时前端会先问 /play 再拉 /stream，两个请求几乎同时到，
+  // 不做去重就会对同一集打两次上游。
+  const running = playbackInflight.get(key);
+  if (running) return running;
+  const task = computePlayback(key).finally(() => {
+    playbackInflight.delete(key);
+  });
+  playbackInflight.set(key, task);
+  return task;
+}
+
+async function computePlayback(key) {
   let source = null;
   try {
-    source = await appStream(key);
-  } catch {
+    source = await appStreamWithRecovery(key);
+  } catch (error) {
+    // 静默回退是线上行为；排障时用 XGG_DEBUG=1 看 App 接口为什么被跳过。
+    if (process.env.XGG_DEBUG) {
+      console.warn(
+        JSON.stringify({ event: "app_stream_fallback", id: key, message: error?.message })
+      );
+    }
     source = null;
   }
   if (!source) source = await publicPreview(key);
@@ -1307,6 +1533,11 @@ export async function resolvePlayback(id) {
  * 解析失败时退回官网公开预览的逐集探测（只有前几集）。
  */
 const coverageCache = new Map();
+/**
+ * 同一部剧的并发详情请求只探测一次。
+ * 没有这张表时，同一部剧连点两次详情会各打一次上游（缓存要等第一次返回才写）。
+ */
+const coverageInflight = new Map();
 
 export async function previewCoverage(episodeIds) {
   const list = Array.isArray(episodeIds) ? episodeIds : [];
@@ -1315,10 +1546,21 @@ export async function previewCoverage(episodeIds) {
   const cached = cacheGet(coverageCache, key);
   if (cached !== null) return cached;
 
+  const running = coverageInflight.get(key);
+  if (running) return running;
+
+  const task = computeCoverage(list, key).finally(() => {
+    coverageInflight.delete(key);
+  });
+  coverageInflight.set(key, task);
+  return task;
+}
+
+async function computeCoverage(list, key) {
   // 先看 App 接口能不能解析最后一集——能就整部可播。
   try {
     const last = String(list[list.length - 1]);
-    const probe = await appStream(last);
+    const probe = await appStreamWithRecovery(last);
     if (probe) {
       cacheSet(coverageCache, key, list.length);
       return list.length;
@@ -1326,7 +1568,7 @@ export async function previewCoverage(episodeIds) {
   } catch {
     // App 接口只是慢或临时失败时，不要退化成 40 次逐集探测：
     // 匿名状态下它本来就能覆盖整部剧，误判成「只有前几集可播」比
-    // 多等 20 秒更糟。缓存 60 秒后重试，避免把偶发失败钉死。
+    // 多等 20 秒更糟。缓存 3 分钟后重试，避免把偶发失败钉死。
     if (!hasAccountCookie()) {
       cacheSet(coverageCache, key, list.length);
       return list.length;
