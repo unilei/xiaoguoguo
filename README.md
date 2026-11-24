@@ -155,15 +155,56 @@ session 时（返回 1066），再用同一条凭证换字段名走 `UpsmsVerify
 > Cookie 等同于账号凭据，请不要发给别人、不要提交到仓库，也不要在公共电脑上使用。
 > 平台修改接口后该方式可能失效。
 
-## 部署到 Vercel（推荐）
+## 部署
 
-Vercel 跑完整 Node.js，服务端可以直接复用，无需改造。
+### Docker + GitHub Actions（当前生产）
+
+生产地址：**http://198.44.125.49:8788**
+
+推 `main` 自动部署：
+
+```
+git push main
+  → Actions 构建镜像，推 ghcr.io/unilei/xiaoguoguo:sha-<commit>（同时打 latest）
+  → SSH 到服务器：写 .image-tag / .env → docker compose pull → up -d → 等 health 通过
+```
+
+服务器侧（`/opt/xiaoguoguo/`）：
+
+```
+docker-compose.yml     与仓库的 docker-compose.server.yml 同源
+.env                   IMAGE_VERSION=<sha>，CI 每次覆盖
+.image-tag             同上，人可读
+data/                  挂到容器 /app/server/.data
+```
+
+**`data/` 别删。** 里面是 `device.json` 和 `account-cookie`；容器重建若换掉
+device.json，平台会当成一台新设备，而 device_id 是会被按线路限流的（见
+`server/src/provider.mjs` 里线路池那段注释）。
+
+回滚到任意 commit（镜像 tag 就是 commit sha）：
+
+```bash
+ssh root@198.44.125.49 'cd /opt/xiaoguoguo \
+  && sed -i "s|^IMAGE_VERSION=.*|IMAGE_VERSION=sha-<完整commit>|" .env \
+  && docker compose up -d'
+```
+
+需要 3 个仓库 secret：`DEPLOY_HOST` / `DEPLOY_USER` / `DEPLOY_SSH_KEY`。
+改了 `docker-compose.server.yml` 要手动同步到服务器——CI 只跑 SSH 命令，不传文件。
+
+### Vercel
+
+Vercel 跑完整 Node.js，服务端可直接复用：
 
 1. 打开 <https://vercel.com/new>，用 GitHub 授权并导入 `unilei/xiaoguoguo`
 2. 保持默认配置（`vercel.json` 已写好），点 Deploy
 3. 之后每次 `git push` 都会自动部署
 
 详见 [Vercel 部署说明](docs/VERCEL.md)。
+
+> Vercel 没有共享磁盘，`device.json` 会随冷启动丢失，设备身份靠前端回传的
+> `x-xgg-device` 维持。自托管（Docker）没有这个问题，所以现在以 Docker 为主。
 
 ## 架构
 
