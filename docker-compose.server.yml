@@ -17,6 +17,9 @@ services:
       - NODE_ENV=production
       - HOST=0.0.0.0
       - PORT=8788
+      # 排障开关：在 .env 里写 XGG_DEBUG=1 后 up -d，日志会打印每条线路的
+      # 状态与响应长度（判断设备是不是被某几条线路限流）。
+      - XGG_DEBUG=${XGG_DEBUG:-}
       # 需要带账号 Cookie 跑时用环境变量注入（不落盘）：
       # - ACCOUNT_COOKIE=${ACCOUNT_COOKIE:-}
     volumes:
