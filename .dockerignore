@@ -1,0 +1,20 @@
+# 依赖与构建产物都不进构建上下文：
+# 镜像里会重新 npm ci + vite build，拷进去只会拖慢上传
+node_modules
+**/node_modules
+web/dist
+**/dist
+
+# 运行时数据：device.json / account-cookie，绝不能打进镜像
+server/.data
+**/.data
+
+# 仓库与本地工具产物
+.git
+.gitignore
+.vercel
+.vercelignore
+**/.DS_Store
+**/*.log
+.tsbuildinfo
+**/tsconfig.tsbuildinfo

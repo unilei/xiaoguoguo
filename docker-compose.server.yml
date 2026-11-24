@@ -1,0 +1,41 @@
+# 服务器端 Docker Compose 配置（对应服务器上的 /opt/xiaoguoguo/docker-compose.yml）
+#
+# 由 GitHub Actions 通过 SSH 触发：写入 .env 的 IMAGE_VERSION → pull → up -d。
+# ⚠️ 与 aipanme 的做法一致：CI 只跑 SSH 命令，不会把这个文件传到服务器，
+#    改完仓库里这份要手动同步到服务器，否则两边会漂移。
+#
+# 访问方式：http://<服务器IP>:8788 （端口直连，不经过 nginx）
+
+services:
+  xiaoguoguo:
+    image: ghcr.io/unilei/xiaoguoguo:${IMAGE_VERSION:-latest}
+    container_name: xiaoguoguo-web
+    restart: unless-stopped
+    ports:
+      - "8788:8788"
+    environment:
+      - NODE_ENV=production
+      - HOST=0.0.0.0
+      - PORT=8788
+      # 需要带账号 Cookie 跑时用环境变量注入（不落盘）：
+      # - ACCOUNT_COOKIE=${ACCOUNT_COOKIE:-}
+    volumes:
+      # device.json / account-cookie 必须持久化。
+      # 容器重建如果换掉 device.json，平台侧就当成一台新设备；
+      # 之前查过：device_id 被线路级限流的设备会一直回 200 空体。
+      - ./data:/app/server/.data
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8788/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
