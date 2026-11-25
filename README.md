@@ -157,9 +157,13 @@ session 时（返回 1066），再用同一条凭证换字段名走 `UpsmsVerify
 
 ## 部署
 
-### Docker + GitHub Actions（当前生产）
+> **状态：已于 2026-11-25 下线。** 服务器上的容器、镜像、`/opt/xiaoguoguo` 目录
+> 以及仓库的 deploy workflow、3 个部署 secret 全部删除。下面保留完整记录，
+> 需要重新上线时照着做即可（`Dockerfile`、`docker-compose.server.yml` 仍在仓库里）。
 
-生产地址：**http://198.44.125.49:8788**
+### Docker + GitHub Actions（曾用于生产，现已下线）
+
+原生产地址：`http://198.44.125.49:8788`
 
 推 `main` 自动部署：
 
